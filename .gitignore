@@ -2,10 +2,11 @@ build/
 strata_data/
 compile_commands.json
 
-# Internal working notes -- not part of the public-facing repo.
-# STRATA_DESIGN.md (locked format/plan) and README.md (final report) stay
-# tracked; this is the phase-by-phase implementation-decision log.
+# Internal working notes -- planning/process docs for development, not
+# part of the public-facing repo. Only README.md is tracked as the
+# recruiter/reviewer-facing entry point; source code speaks for itself.
 ARCHITECTURE.md
+STRATA_DESIGN.md
 
 # OS / editor cruft
 .DS_Store
