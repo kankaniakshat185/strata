@@ -10,7 +10,7 @@ CORE_LIB  := $(BUILD_DIR)/libstrata_core.a
 
 .PHONY: all test clean phase1-check
 
-all: $(BUILD_DIR)/test_trivial $(BUILD_DIR)/test_wal $(BUILD_DIR)/test_gorilla $(BUILD_DIR)/test_l0 $(BUILD_DIR)/test_manifest $(BUILD_DIR)/test_compaction $(BUILD_DIR)/strata_tool
+all: $(BUILD_DIR)/test_trivial $(BUILD_DIR)/test_wal $(BUILD_DIR)/test_gorilla $(BUILD_DIR)/test_l0 $(BUILD_DIR)/test_manifest $(BUILD_DIR)/test_compaction $(BUILD_DIR)/test_inverted_index $(BUILD_DIR)/strata_tool
 
 $(OBJ_DIR):
 	mkdir -p $(OBJ_DIR)
@@ -39,6 +39,9 @@ $(BUILD_DIR)/test_manifest: tests/test_manifest.cpp $(CORE_LIB)
 $(BUILD_DIR)/test_compaction: tests/test_compaction.cpp $(CORE_LIB)
 	$(CXX) $(CXXFLAGS) $< $(CORE_LIB) -o $@
 
+$(BUILD_DIR)/test_inverted_index: tests/test_inverted_index.cpp $(CORE_LIB)
+	$(CXX) $(CXXFLAGS) $< $(CORE_LIB) -o $@
+
 $(BUILD_DIR)/strata_tool: tools/strata_tool.cpp $(CORE_LIB)
 	$(CXX) $(CXXFLAGS) $< $(CORE_LIB) -o $@
 
@@ -49,6 +52,7 @@ test: all
 	$(BUILD_DIR)/test_l0
 	$(BUILD_DIR)/test_manifest
 	$(BUILD_DIR)/test_compaction
+	$(BUILD_DIR)/test_inverted_index
 
 phase1-check: $(BUILD_DIR)/strata_tool
 	tests/phase1_crash_recovery.sh

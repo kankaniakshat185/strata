@@ -7,13 +7,18 @@
 // it partway through, then run `recover` and confirm the engine comes back
 // with no crash and a plausible partial point count. See
 // tests/phase1_crash_recovery.sh.
+#include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <random>
 #include <string>
+#include <vector>
 
 #include "strata/compactor.hpp"
 #include "strata/engine.hpp"
 #include "strata/fsutil.hpp"
+#include "strata/inverted_index.hpp"
 #include "strata/l0_writer.hpp"
 #include "strata/series_catalog.hpp"
 
@@ -130,17 +135,104 @@ void RunBench(const std::string& data_dir) {
       naive_bytes / actual_bytes);
 }
 
+double Percentile(std::vector<double> v, double p) {
+  std::sort(v.begin(), v.end());
+  size_t idx = size_t(p * double(v.size() - 1));
+  return v[idx];
+}
+
+// Phase 4 checkpoint: index size and p50/p99 lookup latency at 1K/10K/
+// 100K/1M unique label combos -- "the headline graph."
+//
+// Drives InvertedIndex directly rather than through SeriesCatalog: this
+// benchmark is about the index data structure's own scaling behavior
+// (hashmap size, postings-list growth, intersection cost), not disk
+// durability, and series_catalog.log's fsync-per-series write path would
+// make a 1M-series run about disk latency instead. See ARCHITECTURE.md.
+void RunCardinalityBench() {
+  strata::InvertedIndex idx;
+  const std::vector<int64_t> checkpoints = {1000, 10000, 100000, 1000000};
+  const char* kMetrics[] = {"cpu_usage", "mem_usage", "disk_io", "net_io"};
+  const char* kRegions[] = {"us-east", "us-west", "eu-west"};
+
+  std::mt19937_64 rng(42);
+  size_t next_checkpoint = 0;
+
+  for (int64_t i = 0; i < checkpoints.back(); ++i) {
+    // "host" is the high-cardinality dimension (unique per series, like a
+    // real fleet of hosts); "metric"/"region" are shared low-cardinality
+    // dimensions whose postings lists grow with N -- the realistic mixed
+    // shape STRATA_DESIGN.md's cardinality-explosion framing describes.
+    std::string canonical = strata::CanonicalLabelString({
+        {"host", "h" + std::to_string(i)},
+        {"metric", kMetrics[i % 4]},
+        {"region", kRegions[i % 3]},
+    });
+    idx.AddSeries(uint64_t(i + 1), canonical);
+
+    if (next_checkpoint < checkpoints.size() &&
+        i + 1 == checkpoints[next_checkpoint]) {
+      int64_t n = checkpoints[next_checkpoint];
+      size_t samples = size_t(std::min<int64_t>(n, 5000));
+      std::uniform_int_distribution<int64_t> dist(0, n - 1);
+
+      std::vector<double> lookup_ns, intersect_ns;
+      lookup_ns.reserve(samples);
+      intersect_ns.reserve(samples);
+
+      for (size_t s = 0; s < samples; ++s) {
+        int64_t k = dist(rng);
+        std::string host_kv = "host=h" + std::to_string(k);
+        std::string metric_kv = std::string("metric=") + kMetrics[k % 4];
+        std::string region_kv = std::string("region=") + kRegions[k % 3];
+
+        auto t0 = std::chrono::steady_clock::now();
+        const auto* found = idx.Find(host_kv);
+        auto t1 = std::chrono::steady_clock::now();
+        (void)found;
+        lookup_ns.push_back(
+            std::chrono::duration<double, std::nano>(t1 - t0).count());
+
+        auto t2 = std::chrono::steady_clock::now();
+        auto matched = idx.IntersectQuery({host_kv, metric_kv, region_kv});
+        auto t3 = std::chrono::steady_clock::now();
+        (void)matched;
+        intersect_ns.push_back(
+            std::chrono::duration<double, std::nano>(t3 - t2).count());
+      }
+
+      std::printf(
+          "cardbench: N=%lld distinct_pairs=%zu total_postings=%llu "
+          "est_bytes=%llu lookup_p50=%.0fns lookup_p99=%.0fns "
+          "intersect_p50=%.0fns intersect_p99=%.0fns\n",
+          static_cast<long long>(n), idx.distinct_label_pairs(),
+          static_cast<unsigned long long>(idx.total_postings_entries()),
+          static_cast<unsigned long long>(idx.EstimatedBytes()),
+          Percentile(lookup_ns, 0.50), Percentile(lookup_ns, 0.99),
+          Percentile(intersect_ns, 0.50), Percentile(intersect_ns, 0.99));
+      std::fflush(stdout);
+      ++next_checkpoint;
+    }
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+  if (argc >= 2 && std::string(argv[1]) == "cardbench") {
+    RunCardinalityBench();
+    return 0;
+  }
+
   if (argc < 3) {
     std::fprintf(
         stderr,
         "usage: %s write <data_dir> <num_points>\n"
         "       %s recover <data_dir>\n"
         "       %s bench <data_dir>\n"
-        "       %s compact <data_dir> [bucket_width_ms] [min_age_seconds]\n",
-        argv[0], argv[0], argv[0], argv[0]);
+        "       %s compact <data_dir> [bucket_width_ms] [min_age_seconds]\n"
+        "       %s cardbench\n",
+        argv[0], argv[0], argv[0], argv[0], argv[0]);
     return 2;
   }
 

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "strata/manifest.hpp"
 #include "strata/memtable.hpp"
@@ -45,6 +46,11 @@ class Engine {
   void Flush();
 
   EngineStats Stats() const;
+
+  // Resolves a set of "key=value" label matchers to the series_ids
+  // carrying all of them, via the inverted index. See inverted_index.hpp.
+  std::vector<uint64_t> QuerySeries(
+      const std::vector<std::string>& label_kvs) const;
 
  private:
   std::string WalPath() const;

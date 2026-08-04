@@ -6,6 +6,8 @@
 #include <utility>
 #include <vector>
 
+#include "strata/inverted_index.hpp"
+
 namespace strata {
 
 // Sorts labels alphabetically by key and joins as "k1=v1,k2=v2", per
@@ -15,8 +17,10 @@ std::string CanonicalLabelString(
 
 // Append-only series_catalog.log: (series_id: u64, label_len: u32,
 // label_string: bytes), written once per new series. Replayed on startup to
-// rebuild the label<->id mapping (and, from Phase 4 on, the inverted
-// index). series_id is a monotonic counter, not a hash.
+// rebuild the label<->id mapping and the inverted index (series identity
+// never changes after creation, so both are fully derivable from this one
+// log -- no separate persisted index format is needed).
+// series_id is a monotonic counter, not a hash.
 class SeriesCatalog {
  public:
   explicit SeriesCatalog(const std::string& path);
@@ -24,11 +28,13 @@ class SeriesCatalog {
   SeriesCatalog(const SeriesCatalog&) = delete;
   SeriesCatalog& operator=(const SeriesCatalog&) = delete;
 
-  // Returns the existing id for `canonical_labels`, or assigns and persists
-  // a new one.
+  // Returns the existing id for `canonical_labels`, or assigns, persists,
+  // and indexes a new one.
   uint64_t GetOrCreate(const std::string& canonical_labels);
 
   size_t series_count() const { return label_to_id_.size(); }
+
+  const InvertedIndex& Index() const { return index_; }
 
  private:
   void Replay();
@@ -37,6 +43,7 @@ class SeriesCatalog {
   int fd_ = -1;
   uint64_t next_id_ = 1;
   std::unordered_map<std::string, uint64_t> label_to_id_;
+  InvertedIndex index_;
 };
 
 }  // namespace strata

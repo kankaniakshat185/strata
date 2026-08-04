@@ -102,4 +102,9 @@ EngineStats Engine::Stats() const {
   return stats;
 }
 
+std::vector<uint64_t> Engine::QuerySeries(
+    const std::vector<std::string>& label_kvs) const {
+  return catalog_->Index().IntersectQuery(label_kvs);
+}
+
 }  // namespace strata

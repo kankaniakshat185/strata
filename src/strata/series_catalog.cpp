@@ -75,6 +75,7 @@ void SeriesCatalog::Replay() {
     }
 
     label_to_id_[label] = id;
+    index_.AddSeries(id, label);
     if (id >= next_id_) next_id_ = id + 1;
 
     good_offset += record_size;
@@ -107,6 +108,7 @@ uint64_t SeriesCatalog::GetOrCreate(const std::string& canonical_labels) {
   }
 
   label_to_id_[canonical_labels] = id;
+  index_.AddSeries(id, canonical_labels);
   return id;
 }
 

@@ -182,6 +182,92 @@ unchanged — MANIFEST fixes the compaction-swap crash window, not that one.
 
 ---
 
+## Phase 4 — Inverted label index
+
+**Keyed by the full `"key=value"` matcher, not by key alone.** The design
+doc's diagram says "label key → series IDs," but a key-only index (e.g.
+`host` → every series with any host) wouldn't actually solve the
+cardinality problem it's meant to solve — nearly every series has a
+`host`, so that postings list would be close to the whole index. Keying by
+the complete pair (`host=h3`) is what makes the index selective, and is
+how Prometheus's label index actually works, which STRATA_DESIGN.md's own
+interview-framing section names as the point of comparison.
+
+**No separate persisted index format — it's entirely rebuilt from
+`series_catalog.log` on startup.** Series identity is immutable once a
+series_id is assigned (STRATA_DESIGN.md is explicit that ids are a
+monotonic counter, never reused), so the index is a pure function of the
+catalog log's contents. `SeriesCatalog` owns the `InvertedIndex` and
+updates it at the only two places series get created: `GetOrCreate` (new
+series during normal writes) and `Replay` (startup). This was already
+implied by the design doc's own text under "Series catalog" — replaying
+the log is described as rebuilding "the inverted index," not just the
+id map — Phase 4 just makes that literal.
+
+**Postings-list sort order is a load-bearing invariant, not an
+accident.** `IntersectQuery` uses a merge-based `std::set_intersection`
+(O(n+m), not a hash-based scan) instead of sorting on every query call.
+That's only correct because every postings list is guaranteed sorted
+ascending by construction: `series_id` is assigned by a monotonic
+counter, and `AddSeries` is only ever called in that same creation order
+(via `GetOrCreate` for new writes, via `Replay` in file order for
+recovery — both already increasing). Flagged explicitly in
+[inverted_index.hpp](src/strata/inverted_index.hpp) because it's the kind
+of invariant that's easy to silently violate later (e.g. a future
+deletion/merge feature that reorders or removes ids) without anything
+obviously breaking until a query returns a wrong, silently-incomplete
+result.
+
+**Intersection starts from the smallest postings list.** A query like
+`{region=us-east, host=h3}` mixes a highly selective filter (one host)
+with a filter that might match a large fraction of the index (a whole
+region). Sorting the requested lists by size before intersecting, and
+starting from the smallest, keeps the running intersection small the
+whole way through instead of repeatedly filtering a huge list down. This
+is exactly what the cardinality-scaling benchmark below demonstrates:
+3-filter intersection latency stays roughly flat even once the
+shared-label postings lists (metric, region) have grown to hundreds of
+thousands of entries.
+
+**The cardinality-scaling benchmark drives `InvertedIndex` directly,
+bypassing `SeriesCatalog`'s disk-backed path entirely.** `GetOrCreate`
+fsyncs on every new series — appropriate for real writes, but it would
+make a 1M-series benchmark measure disk latency, not the index's own
+scaling behavior, which is what this checkpoint is actually about. The
+benchmark tool (`strata_tool cardbench`) builds an `InvertedIndex` in
+memory and assigns series_ids itself.
+
+**Benchmark data shape: one high-cardinality dimension (`host`, unique per
+series) plus two shared low-cardinality dimensions (`metric`, `region`,
+each a handful of values).** Uniform-cardinality synthetic data (every
+label unique) wouldn't exercise the actual failure mode the design doc's
+"cardinality explosion" section describes — the interesting cost is
+postings lists for common label values (a whole region, a whole metric
+type) growing alongside total series count. This shape produces both: N
+one-entry postings lists (`host=hN`) and a handful of postings lists that
+grow to a large fraction of N (`region=us-east`), which is what makes the
+small-list-first intersection optimization above actually matter in the
+benchmark rather than being untested code.
+
+**`EstimatedBytes()` is an approximation, not a real memory measurement.**
+`unordered_map`'s actual per-bucket/node overhead is implementation- and
+platform-specific; the estimate sums string/vector capacities plus a
+flat per-entry guess. Good enough to plot a size-vs-cardinality trend
+(the benchmark's purpose), not precise enough to be a memory budget.
+
+Results at 1K / 10K / 100K / 1M unique combos (measured on the dev
+machine; full data in `tests/` output and the cardinality-bench
+artifact): index size scales roughly linearly with cardinality as
+expected (~147KB at 1K to ~147MB at 1M), while lookup and intersection
+latency both stay in the sub-microsecond-to-low-microsecond range even
+at 1M — the one exception being 3-filter intersection p99 at 1M, which
+jumps to ~25.5µs, plausibly tail latency from occasionally hitting the
+large shared-label postings lists before the small-list-first ordering
+kicks in. Worth digging into further if Phase 7's writeup wants to make
+a claim about worst-case query latency, not just typical-case.
+
+---
+
 ## Git
 
 The repo is committed per phase as each phase's checkpoint passes, so
