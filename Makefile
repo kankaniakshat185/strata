@@ -1,5 +1,5 @@
 CXX      := clang++
-CXXFLAGS := -std=c++20 -Wall -Wextra -g -Isrc
+CXXFLAGS := -std=c++20 -Wall -Wextra -g -Isrc -pthread
 
 BUILD_DIR := build
 OBJ_DIR   := $(BUILD_DIR)/obj

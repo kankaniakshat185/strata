@@ -53,15 +53,26 @@ std::string Engine::NextL0Path() {
 
 void Engine::Write(const std::string& canonical_labels, int64_t timestamp_ms,
                     double value) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  WriteImpl(canonical_labels, timestamp_ms, value);
+}
+
+void Engine::WriteImpl(const std::string& canonical_labels,
+                        int64_t timestamp_ms, double value) {
   uint64_t series_id = catalog_->GetOrCreate(canonical_labels);
   wal_->Append({series_id, timestamp_ms, value});
   memtable_.Insert(series_id, timestamp_ms, value);
   if (memtable_.size() >= flush_threshold_) {
-    Flush();
+    FlushImpl();
   }
 }
 
 void Engine::Flush() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  FlushImpl();
+}
+
+void Engine::FlushImpl() {
   if (memtable_.empty()) return;
 
   std::string path = NextL0Path();
@@ -101,6 +112,7 @@ void Engine::Flush() {
 }
 
 EngineStats Engine::Stats() const {
+  std::lock_guard<std::mutex> lock(mutex_);
   EngineStats stats;
   stats.series_count = catalog_->series_count();
   stats.memtable_points = memtable_.size();
@@ -120,11 +132,13 @@ EngineStats Engine::Stats() const {
 
 std::vector<uint64_t> Engine::QuerySeries(
     const std::vector<std::string>& label_kvs) const {
+  std::lock_guard<std::mutex> lock(mutex_);
   return catalog_->Index().IntersectQuery(label_kvs);
 }
 
 QueryResult Engine::Query(const std::vector<std::string>& label_kvs,
                            int64_t start_ms, int64_t end_ms) const {
+  std::lock_guard<std::mutex> lock(mutex_);
   return RunQuery(data_dir_, manifest_, catalog_->Index(), memtable_,
                    label_kvs, start_ms, end_ms);
 }

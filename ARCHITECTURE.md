@@ -388,6 +388,55 @@ were correctly reasoned about, not just asserting they were.
 
 ---
 
+## Phase 7 — Load testing + writeup
+
+**`Engine` gets exactly one coarse `std::mutex`, not per-field locks or
+sharding, added specifically to make the concurrent-writer benchmark
+possible and correct.** Every earlier phase's ARCHITECTURE.md entry
+describes `Engine` as single-threaded; Phase 7's "ramp concurrent writers"
+checkpoint can't be honestly measured against a data structure with no
+thread-safety at all (that's a data race, not a benchmark). The choice
+was coarse-grained specifically *because* the write path's real bottleneck
+is `WalWriter::Append`'s `fsync` — a syscall, not a data-structure
+operation — so a finer lock (per-series, sharded MemTables, whatever)
+would add real implementation complexity while not moving the actual
+ceiling at all: even with zero lock contention, no thread can return from
+`Write()` faster than one `fsync` takes. The load-test results confirm
+this directly — flat throughput from 1 to 32 threads is exactly what
+"the lock isn't the bottleneck, the syscall is" predicts. A finer lock
+would be solving a problem the benchmark shows doesn't exist.
+
+**`Write()`/`Flush()` split into locking public wrappers and non-locking
+`*Impl` private bodies**, because `Write()` calls `Flush()` internally
+when crossing the flush threshold — with a plain (non-recursive)
+`std::mutex`, a public `Flush()` that re-locks would deadlock the moment
+an in-flush write triggered it. The `*Impl` methods assume the lock is
+already held and are only ever called that way.
+
+**The load generator suppresses flushing entirely during the timed
+region** (`flush_threshold` set above the total point count across every
+concurrency step) so the measurement isolates the write path's own
+steady-state throughput under lock + fsync contention from flush-pause
+noise, which would otherwise show up as an unrelated latency spike
+unconnected to concurrency at all.
+
+**The gzip-on-CSV and p99-divergence benchmarks STRATA_DESIGN.md's plan
+calls for were run as one-off analyses (`awk`/`gzip`, a short Python
+script), not built into `strata_tool`.** Both are comparisons *against*
+this project's format, not exercises *of* it — there's no ongoing reason
+for the codebase to carry gzip-invocation or synthetic-percentile-analysis
+code as a permanent feature. Full methodology and numbers are in
+[README.md](README.md#compression) and [README.md](README.md#compaction--storage-footprint-and-rollup-accuracy)
+rather than duplicated here.
+
+**README.md, not this file, is where all the numbers live.** ARCHITECTURE.md
+stays what it's been since Phase 0: the *why* behind implementation
+choices. README.md is the compiled, final-state benchmark report Phase 7
+asks for, plus the explicit implemented-vs-stretch section — written
+last, once every number in it was actually measured, not projected.
+
+---
+
 ## Git
 
 The repo is committed per phase as each phase's checkpoint passes, so

@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "strata/compactor.hpp"
@@ -355,6 +356,52 @@ void RunCrashTest(const std::string& point, const std::string& data_dir) {
       point.c_str());
 }
 
+// Phase 7 checkpoint: ramp concurrent writers against one shared Engine,
+// find the throughput knee. flush_threshold is set above the total point
+// count across every step combined so no flush happens during the timed
+// region -- this isolates the write path's own steady-state throughput
+// under lock + WAL-fsync contention from flush-pause noise.
+void RunLoadTest(const std::string& data_dir) {
+  std::system(("rm -rf " + data_dir).c_str());
+
+  const std::vector<int> kThreadCounts = {1, 2, 4, 8, 16, 32};
+  constexpr int kPointsPerThread = 15000;
+
+  size_t total_points = 0;
+  for (int n : kThreadCounts) total_points += size_t(n) * kPointsPerThread;
+  strata::Engine engine(data_dir, /*flush_threshold=*/total_points + 1);
+
+  std::printf("loadtest: %d points/thread/step, flush suppressed during the run\n",
+              kPointsPerThread);
+  std::printf("%-8s %14s %12s\n", "threads", "points/sec", "elapsed_ms");
+
+  for (int n : kThreadCounts) {
+    std::vector<std::thread> workers;
+    workers.reserve(n);
+
+    auto t0 = std::chrono::steady_clock::now();
+    for (int t = 0; t < n; ++t) {
+      workers.emplace_back([&engine, t]() {
+        std::string labels = strata::CanonicalLabelString({
+            {"host", "loadtest-h" + std::to_string(t)},
+            {"metric", "cpu_usage"},
+            {"region", "us-east"},
+        });
+        constexpr int64_t kBaseTs = 1700000000000;
+        for (int i = 0; i < kPointsPerThread; ++i) {
+          engine.Write(labels, kBaseTs + i, double(i % 100) * 0.1);
+        }
+      });
+    }
+    for (auto& w : workers) w.join();
+    auto t1 = std::chrono::steady_clock::now();
+
+    double elapsed_s = std::chrono::duration<double>(t1 - t0).count();
+    double points_per_sec = double(n) * kPointsPerThread / elapsed_s;
+    std::printf("%-8d %14.0f %12.1f\n", n, points_per_sec, elapsed_s * 1000.0);
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -380,8 +427,10 @@ int main(int argc, char** argv) {
         "       %s compact <data_dir> [bucket_width_ms] [min_age_seconds]\n"
         "       %s cardbench\n"
         "       %s query-bench <data_dir>\n"
-        "       %s crashtest <point> <data_dir>\n",
-        argv[0], argv[0], argv[0], argv[0], argv[0], argv[0], argv[0]);
+        "       %s crashtest <point> <data_dir>\n"
+        "       %s loadtest <data_dir>\n",
+        argv[0], argv[0], argv[0], argv[0], argv[0], argv[0], argv[0],
+        argv[0]);
     return 2;
   }
 
@@ -404,6 +453,8 @@ int main(int argc, char** argv) {
     RunCompact(data_dir, bucket_width_ms, min_age_seconds);
   } else if (mode == "query-bench") {
     RunQueryBench(data_dir);
+  } else if (mode == "loadtest") {
+    RunLoadTest(data_dir);
   } else {
     std::fprintf(stderr, "unknown mode: %s\n", mode.c_str());
     return 2;

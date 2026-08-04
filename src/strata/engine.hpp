@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -24,8 +25,11 @@ struct EngineStats {
 };
 
 // Ties WAL + MemTable + SeriesCatalog + L0 flush + MANIFEST together, per
-// STRATA_DESIGN.md's write path. Single-threaded; compaction itself lives
-// in compactor.hpp/.cpp and is invoked separately (see ARCHITECTURE.md).
+// STRATA_DESIGN.md's write path. Thread-safe via one coarse mutex (see
+// ARCHITECTURE.md's Phase 7 notes on why coarse, not sharded/lock-free);
+// compaction itself lives in compactor.hpp/.cpp and is invoked separately,
+// against the same on-disk state, never concurrently with a live Engine
+// in the same process (see the Phase 5 notes on why that's unsafe today).
 class Engine {
  public:
   // Opens (creating if needed) `data_dir`, replays series_catalog.log and
@@ -60,8 +64,21 @@ class Engine {
                      int64_t start_ms, int64_t end_ms) const;
 
  private:
+  // *Impl methods assume mutex_ is already held -- Write() calls
+  // FlushImpl() directly when crossing the threshold, and a
+  // non-recursive mutex would deadlock if Flush() re-locked on that path.
+  void WriteImpl(const std::string& canonical_labels, int64_t timestamp_ms,
+                 double value);
+  void FlushImpl();
+
   std::string WalPath() const;
   std::string NextL0Path();
+
+  // One coarse lock guarding all engine state, not per-field or sharded.
+  // See ARCHITECTURE.md's Phase 7 notes: the write path's real bottleneck
+  // is the WAL's fsync-per-append, not lock granularity, so a finer lock
+  // would add complexity without moving the actual ceiling.
+  mutable std::mutex mutex_;
 
   std::string data_dir_;
   size_t flush_threshold_;
