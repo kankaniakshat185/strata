@@ -1,3 +1,13 @@
 build/
 strata_data/
 compile_commands.json
+
+# Internal working notes -- not part of the public-facing repo.
+# STRATA_DESIGN.md (locked format/plan) and README.md (final report) stay
+# tracked; this is the phase-by-phase implementation-decision log.
+ARCHITECTURE.md
+
+# OS / editor cruft
+.DS_Store
+.vscode/
+.idea/

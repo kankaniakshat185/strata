@@ -7,7 +7,6 @@ inverted label index keeps high-cardinality label queries fast; a query
 router picks the right resolution level (or both, stitched) per request.
 
 Full design rationale and the locked on-disk format: [STRATA_DESIGN.md](STRATA_DESIGN.md).
-Implementation trade-offs made along the way, phase by phase: [ARCHITECTURE.md](ARCHITECTURE.md).
 This file is the front door: what got built, how to run it, and every
 benchmark result in one place.
 
@@ -26,10 +25,10 @@ make test                                  # build everything, run all unit test
 ./tests/phase6_crash_recovery.sh           # deterministic fault-injection recovery tests
 ```
 
-No external dependencies; `make` uses `clang++ -std=c++20` directly (see
-[ARCHITECTURE.md](ARCHITECTURE.md#phase-0--setup) for why Make instead of
-CMake). 12 unit test binaries, all passing; 2 shell-driven crash-recovery
-harnesses.
+No external dependencies; `make` uses `clang++ -std=c++20` directly (cmake
+wasn't available on the dev machine, and the project's scope — no
+dependencies, one platform — doesn't need it). 12 unit test binaries, all
+passing; 2 shell-driven crash-recovery harnesses.
 
 ## Implemented vs. stretch — final status
 
@@ -37,12 +36,12 @@ harnesses.
 
 | Component | Status |
 |---|---|
-| WAL, MemTable, flush to L0 | Done — [Phase 1](ARCHITECTURE.md#phase-1--wal--memtable--flush) |
-| Gorilla compression (delta-of-delta + XOR) | Done — [Phase 2](ARCHITECTURE.md#phase-2--gorilla-encoding) |
-| One compaction level (L0→L1), statistical downsampling | Done — [Phase 3](ARCHITECTURE.md#phase-3--compaction-with-downsampling) |
-| Inverted label index | Done — [Phase 4](ARCHITECTURE.md#phase-4--inverted-label-index) |
-| Query router | Done — [Phase 5](ARCHITECTURE.md#phase-5--query-router) |
-| Crash recovery via WAL replay, verified with fault injection | Done — [Phase 6](ARCHITECTURE.md#phase-6--formal-crash-recovery-testing) |
+| WAL, MemTable, flush to L0 | Done — Phase 1 |
+| Gorilla compression (delta-of-delta + XOR) | Done — Phase 2 |
+| One compaction level (L0→L1), statistical downsampling | Done — Phase 3 |
+| Inverted label index | Done — Phase 4 |
+| Query router | Done — Phase 5 |
+| Crash recovery via WAL replay, verified with fault injection | Done — Phase 6 |
 
 **Stretch goals — not attempted, scope stayed on core:**
 
@@ -108,9 +107,11 @@ compressor doesn't.
 
 ### Cardinality scaling — 1K to 1M unique label combinations
 
-The design doc calls this "the single most important graph." Full
-methodology and chart:
-[ARCHITECTURE.md's Phase 4 notes](ARCHITECTURE.md#phase-4--inverted-label-index).
+The design doc calls this "the single most important graph." Driven
+directly against `InvertedIndex` rather than through the disk-backed
+`SeriesCatalog`, since this benchmark is about the index structure's own
+scaling behavior, not fsync latency — see `strata_tool cardbench` in
+[tools/strata_tool.cpp](tools/strata_tool.cpp).
 
 | N | Distinct label pairs | Index size (est.) | Lookup p50 / p99 | 3-filter intersect p50 / p99 |
 |---|---|---|---|---|
@@ -173,7 +174,7 @@ scope here.
 
 100 synthetic days of data: the most recent 2 days left "hot" in L0,
 everything older compacted into one L1 block per day (98 L1 blocks
-total). Full methodology: [ARCHITECTURE.md's Phase 5 notes](ARCHITECTURE.md#phase-5--query-router).
+total). See `strata_tool query-bench` in [tools/strata_tool.cpp](tools/strata_tool.cpp).
 
 | Range | Latency | L0 blocks scanned/skipped | L1 blocks scanned/skipped | Result |
 |---|---|---|---|---|
@@ -207,8 +208,9 @@ shows a scaling trend either up or down with thread count). This is the
 expected, honest result given the design: `WalWriter::Append` `fsync`s on
 every single write, and `Engine` holds one coarse mutex around the whole
 write path (added specifically to make this benchmark meaningful and
-correct — see [ARCHITECTURE.md's Phase 7 notes](ARCHITECTURE.md#phase-7--load-testing--writeup)
-for why coarse rather than sharded). Every writer thread serializes
+correct — a finer-grained lock wouldn't move the ceiling, since no thread
+can return from `Write()` faster than one `fsync` takes regardless of lock
+granularity). Every writer thread serializes
 behind that fsync regardless of how many are contending for it, so
 additional concurrency buys nothing — the system is disk-fsync-bound from
 a single writer already. The natural next step to push this ceiling
@@ -221,9 +223,11 @@ practice in real databases) — legitimate future work, not attempted here.
 Two harnesses: [tests/phase1_crash_recovery.sh](tests/phase1_crash_recovery.sh)
 (external timed `SIGKILL` against a live burst write) and
 [tests/phase6_crash_recovery.sh](tests/phase6_crash_recovery.sh)
-(deterministic fault injection at 5 named code points — see
-[ARCHITECTURE.md's Phase 6 notes](ARCHITECTURE.md#phase-6--formal-crash-recovery-testing)
-for why timing alone can't reach these windows).
+(deterministic fault injection at 5 named code points, via
+[src/strata/fault_injection.hpp](src/strata/fault_injection.hpp) — the
+crash windows this phase targets are a few statements wide,
+sub-millisecond, and a timed external kill has no realistic chance of
+landing inside one).
 
 | Kill point | Outcome |
 |---|---|
@@ -251,11 +255,11 @@ proving that prediction, not discovering a surprise.
   as a live `Engine` on the same data directory**: a live `Engine` caches
   MANIFEST in memory and doesn't reload it, so an out-of-band compaction's
   swap gets silently reverted on the engine's next flush. This bit the
-  Phase 5 query-bench tool during development (see
-  [ARCHITECTURE.md](ARCHITECTURE.md#phase-5--query-router)); the fix there
-  was procedural (don't do that), not architectural. A real deployment
-  would need `Engine` to either own compaction directly or reload MANIFEST
-  before trusting it.
+  Phase 5 query-bench tool during development; the fix there was
+  procedural (don't hold a live `Engine` open across compaction calls in
+  the same process), not architectural. A real deployment would need
+  `Engine` to either own compaction directly or reload MANIFEST before
+  trusting it.
 - **Write throughput is capped by fsync-per-record + one coarse lock**,
   by design choice, not oversight — see the write-throughput section
   above. Group-commit batching is the natural next step, not implemented.
