@@ -4,6 +4,7 @@
 #include <memory>
 #include <string>
 
+#include "strata/manifest.hpp"
 #include "strata/memtable.hpp"
 #include "strata/series_catalog.hpp"
 #include "strata/wal.hpp"
@@ -15,12 +16,14 @@ struct EngineStats {
   uint64_t memtable_points = 0;
   uint64_t l0_blocks = 0;
   uint64_t l0_points = 0;
+  uint64_t l1_blocks = 0;
+  uint64_t l1_buckets = 0;
   uint64_t points_replayed_from_wal = 0;
 };
 
-// Ties WAL + MemTable + SeriesCatalog + L0 flush together, per
-// STRATA_DESIGN.md's write path. Single-threaded; background/threshold
-// tuning and compaction land in later phases.
+// Ties WAL + MemTable + SeriesCatalog + L0 flush + MANIFEST together, per
+// STRATA_DESIGN.md's write path. Single-threaded; compaction itself lives
+// in compactor.hpp/.cpp and is invoked separately (see ARCHITECTURE.md).
 class Engine {
  public:
   // Opens (creating if needed) `data_dir`, replays series_catalog.log and
@@ -52,6 +55,7 @@ class Engine {
   std::unique_ptr<SeriesCatalog> catalog_;
   std::unique_ptr<WalWriter> wal_;
   MemTable memtable_;
+  Manifest manifest_;
   uint64_t next_l0_id_ = 1;
   uint64_t points_replayed_ = 0;
 };

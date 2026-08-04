@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <string>
 
+#include "strata/compactor.hpp"
 #include "strata/engine.hpp"
 #include "strata/fsutil.hpp"
 #include "strata/l0_writer.hpp"
@@ -60,9 +61,37 @@ void RunRecover(const std::string& data_dir) {
               static_cast<unsigned long long>(stats.l0_blocks));
   std::printf("recover: l0_points=%llu\n",
               static_cast<unsigned long long>(stats.l0_points));
+  std::printf("recover: l1_blocks=%llu\n",
+              static_cast<unsigned long long>(stats.l1_blocks));
+  std::printf("recover: l1_buckets=%llu\n",
+              static_cast<unsigned long long>(stats.l1_buckets));
   std::printf("recover: total_points=%llu\n",
               static_cast<unsigned long long>(stats.memtable_points +
                                                stats.l0_points));
+}
+
+void RunCompact(const std::string& data_dir, int64_t bucket_width_ms,
+                 int64_t min_age_seconds) {
+  strata::CompactionResult r =
+      strata::RunCompaction(data_dir, bucket_width_ms, min_age_seconds);
+
+  if (!r.ran) {
+    std::printf("compact: nothing eligible (min_age_seconds=%lld)\n",
+                static_cast<long long>(min_age_seconds));
+    return;
+  }
+
+  std::printf("compact: merged %u L0 block(s), %llu points -> %llu buckets\n",
+              r.l0_blocks_compacted,
+              static_cast<unsigned long long>(r.points_compacted),
+              static_cast<unsigned long long>(r.buckets_written));
+  std::printf("compact: new L1 block: %s\n", r.l1_block_path.c_str());
+  std::printf(
+      "compact: storage: %llu B (L0) -> %llu B (L1), %.2fx smaller\n",
+      static_cast<unsigned long long>(r.l0_bytes_before),
+      static_cast<unsigned long long>(r.l1_bytes_after),
+      r.l1_bytes_after ? double(r.l0_bytes_before) / double(r.l1_bytes_after)
+                        : 0.0);
 }
 
 void RunBench(const std::string& data_dir) {
@@ -105,11 +134,13 @@ void RunBench(const std::string& data_dir) {
 
 int main(int argc, char** argv) {
   if (argc < 3) {
-    std::fprintf(stderr,
-                  "usage: %s write <data_dir> <num_points>\n"
-                  "       %s recover <data_dir>\n"
-                  "       %s bench <data_dir>\n",
-                  argv[0], argv[0], argv[0]);
+    std::fprintf(
+        stderr,
+        "usage: %s write <data_dir> <num_points>\n"
+        "       %s recover <data_dir>\n"
+        "       %s bench <data_dir>\n"
+        "       %s compact <data_dir> [bucket_width_ms] [min_age_seconds]\n",
+        argv[0], argv[0], argv[0], argv[0]);
     return 2;
   }
 
@@ -126,6 +157,10 @@ int main(int argc, char** argv) {
     RunRecover(data_dir);
   } else if (mode == "bench") {
     RunBench(data_dir);
+  } else if (mode == "compact") {
+    int64_t bucket_width_ms = argc > 3 ? std::strtoll(argv[3], nullptr, 10) : 60000;
+    int64_t min_age_seconds = argc > 4 ? std::strtoll(argv[4], nullptr, 10) : 0;
+    RunCompact(data_dir, bucket_width_ms, min_age_seconds);
   } else {
     std::fprintf(stderr, "unknown mode: %s\n", mode.c_str());
     return 2;

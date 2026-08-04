@@ -144,6 +144,7 @@ L0Summary SummarizeL0Block(const std::string& path) {
   summary.series_count = header.series_count;
   summary.min_timestamp = header.min_timestamp;
   summary.max_timestamp = header.max_timestamp;
+  summary.created_at = header.created_at;
   for (uint32_t i = 0; i < header.series_count; ++i) {
     const uint8_t* p =
         buf.data() + kBlockHeaderSize + i * kSeriesIndexEntrySize;

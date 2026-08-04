@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 
@@ -44,6 +45,23 @@ std::vector<std::string> ListFilesWithSuffix(const std::string& dir,
   ::closedir(d);
   std::sort(out.begin(), out.end());
   return out;
+}
+
+uint64_t NextBlockId(const std::string& dir, const std::string& suffix) {
+  uint64_t next_id = 1;
+  for (const auto& name : ListFilesWithSuffix(dir, suffix)) {
+    uint64_t id = std::strtoull(name.c_str(), nullptr, 10);
+    if (id >= next_id) next_id = id + 1;
+  }
+  return next_id;
+}
+
+uint64_t FileSize(const std::string& path) {
+  struct stat st;
+  if (::stat(path.c_str(), &st) != 0) {
+    throw std::runtime_error("FileSize: stat failed for " + path);
+  }
+  return static_cast<uint64_t>(st.st_size);
 }
 
 }  // namespace strata

@@ -112,6 +112,76 @@ handful of points this is negligible against total series size.
 
 ---
 
+## Phase 3 — Compaction with downsampling
+
+**MANIFEST is plain text, not a binary format.** Unlike the block formats,
+STRATA_DESIGN.md doesn't pin down MANIFEST's exact bytes — only that it
+must list live blocks per level and support an atomic temp-file-then-rename
+swap. It's tiny, off the hot path, and this phase's checkpoint is literally
+"hand-verify" — a human-readable `L0 00000004.blk` / `L1 00000001.blk` file
+is easier to inspect mid-debugging than a binary one, at zero cost since
+there's no compression or performance reason to prefer binary here.
+
+**"Background worker" is, for now, an explicit synchronous call
+(`RunCompaction`, invoked via `strata_tool compact`), not an actual
+background thread.** The design doc's Phase 3 checkpoint is about the
+compaction *mechanism* — bucketing, downsampling, the MANIFEST swap — not
+about scheduling. A real background thread would need to coordinate with
+`Engine`'s WAL/MemTable/flush path (which blocks aren't safe to compact
+while mid-flush, locking) — real concurrency-control work that's out of
+proportion to what this phase's checkpoint asks for. Scoped down the same
+way the design doc itself scopes down L1's XOR compression: noted here as
+a deliberate simplification, not an oversight. Revisit if/when a real
+scheduler is worth building.
+
+**Compaction eligibility uses the block header's `created_at` field**,
+which STRATA_DESIGN.md already defines for exactly this purpose ("wall
+clock, drives age-based compaction") — not file mtime, which would work
+too but ignores a field the format already carries for this job.
+
+**L1's series index entry reuses `SeriesIndexEntry.point_count` to mean
+"bucket count."** Same 24-byte layout as L0's index entry, no format
+change needed — the block header's `level` byte already tells a reader
+which unit to expect, so a separate field would just duplicate that
+information.
+
+**Multiple eligible L0 blocks are merged by concatenating each series'
+points and sorting once, not streamed/merged incrementally.** Simpler, and
+correct as long as a compaction batch's total point count stays in the
+"fits comfortably in memory" range it's expected to at this project's
+scale. A true production system compacting many-GB batches would want a
+streaming k-way merge instead.
+
+**p99 uses the nearest-rank method** (sort ascending, take element at
+`ceil(0.99 * n)`, 1-indexed) — deterministic and simple to hand-verify
+against a reference, which is exactly what this phase's checkpoint calls
+for. It's also honest about small-`n` behavior: for a bucket with only a
+handful of points, nearest-rank p99 often equals the max (see
+`tests/test_compaction.cpp`'s 5- and 7-point buckets) — not a bug, just
+what "99th percentile" means with too few samples to have a meaningful
+tail. STRATA_DESIGN.md's benchmarking plan already calls out comparing
+rollup p99 against the true raw p99 as a tradeoff to report honestly in
+Phase 7's writeup.
+
+**MANIFEST-driven orphan cleanup runs on every `Engine`/compaction
+startup, not as a separate maintenance pass.** `LoadOrBootstrapManifest`
+both loads (or bootstraps, for pre-Phase-3 data directories) the manifest
+*and* deletes any on-disk block file it doesn't list — the cleanup for a
+compaction that crashed after writing a new L1 block but before the
+MANIFEST rename made it official. Folding cleanup into every load keeps a
+simple invariant: after `Engine::Engine()` or `RunCompaction()` starts,
+disk state and the in-memory manifest are guaranteed to agree, with no
+separate "run the cleanup job" step to remember.
+
+**`Engine::Stats()` and `Flush()` now go through the manifest instead of
+raw directory listings**, closing part of the gap Phase 1 flagged: before
+MANIFEST existed, stats came from listing `L0/*.blk` directly, which would
+have wrongly counted an orphaned block left by an interrupted compaction
+swap. The underlying flush/WAL-reset non-atomicity noted in Phase 1 is
+unchanged — MANIFEST fixes the compaction-swap crash window, not that one.
+
+---
+
 ## Git
 
 The repo is committed per phase as each phase's checkpoint passes, so

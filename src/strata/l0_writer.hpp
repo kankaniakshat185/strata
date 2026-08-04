@@ -20,6 +20,7 @@ struct L0Summary {
   uint64_t total_data_bytes = 0;  // sum of series data-stream byte_length
   int64_t min_timestamp = 0;
   int64_t max_timestamp = 0;
+  int64_t created_at = 0;  // wall clock; drives age-based compaction
 };
 
 // Reads just the header + series index (not the data streams) to summarize

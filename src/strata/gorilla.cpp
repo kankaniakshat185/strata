@@ -34,32 +34,6 @@ int64_t DecodeDodField(uint64_t code, int nbits) {
   return int64_t(code);
 }
 
-void EncodeTimestampDelta(BitWriter& bw, int64_t dod) {
-  if (dod == 0) {
-    bw.WriteBit(false);
-  } else if (dod >= -63 && dod <= 64) {
-    bw.WriteBits(0b10, 2);
-    bw.WriteBits(EncodeDodField(dod, 7), 7);
-  } else if (dod >= -255 && dod <= 256) {
-    bw.WriteBits(0b110, 3);
-    bw.WriteBits(EncodeDodField(dod, 9), 9);
-  } else if (dod >= -2047 && dod <= 2048) {
-    bw.WriteBits(0b1110, 4);
-    bw.WriteBits(EncodeDodField(dod, 12), 12);
-  } else {
-    bw.WriteBits(0b1111, 4);
-    bw.WriteBits(EncodeDodField(dod, 32), 32);
-  }
-}
-
-int64_t DecodeTimestampDelta(BitReader& br) {
-  if (!br.ReadBit()) return 0;
-  if (!br.ReadBit()) return DecodeDodField(br.ReadBits(7), 7);
-  if (!br.ReadBit()) return DecodeDodField(br.ReadBits(9), 9);
-  if (!br.ReadBit()) return DecodeDodField(br.ReadBits(12), 12);
-  return DecodeDodField(br.ReadBits(32), 32);
-}
-
 // prev_leading/prev_len track the meaningful-bits "window" (leading zero
 // count + significant bit length) of the last *nonzero* XOR, per
 // STRATA_DESIGN.md: a later XOR whose window matches skips re-sending the
@@ -122,6 +96,32 @@ double BitsToDouble(uint64_t bits) {
 }
 
 }  // namespace
+
+void EncodeTimestampDelta(BitWriter& bw, int64_t dod) {
+  if (dod == 0) {
+    bw.WriteBit(false);
+  } else if (dod >= -63 && dod <= 64) {
+    bw.WriteBits(0b10, 2);
+    bw.WriteBits(EncodeDodField(dod, 7), 7);
+  } else if (dod >= -255 && dod <= 256) {
+    bw.WriteBits(0b110, 3);
+    bw.WriteBits(EncodeDodField(dod, 9), 9);
+  } else if (dod >= -2047 && dod <= 2048) {
+    bw.WriteBits(0b1110, 4);
+    bw.WriteBits(EncodeDodField(dod, 12), 12);
+  } else {
+    bw.WriteBits(0b1111, 4);
+    bw.WriteBits(EncodeDodField(dod, 32), 32);
+  }
+}
+
+int64_t DecodeTimestampDelta(BitReader& br) {
+  if (!br.ReadBit()) return 0;
+  if (!br.ReadBit()) return DecodeDodField(br.ReadBits(7), 7);
+  if (!br.ReadBit()) return DecodeDodField(br.ReadBits(9), 9);
+  if (!br.ReadBit()) return DecodeDodField(br.ReadBits(12), 12);
+  return DecodeDodField(br.ReadBits(32), 32);
+}
 
 std::vector<uint8_t> EncodeSeries(
     const std::vector<std::pair<int64_t, double>>& points) {
