@@ -18,6 +18,11 @@ and POSIX file I/O. ~2,400 lines of engine code, ~900 lines of tests,
 (one of which literally sends the process `SIGKILL` mid-write and
 confirms it comes back with no data loss).
 
+**[Read how it works →](docs/HOW_IT_WORKS.md)** — the pipeline walked
+through stage by stage, the compression codec's math with real worked
+examples, and the engineering principles behind the crash-safety and
+query-routing design.
+
 ## Why this project
 
 Most from-scratch database projects stop at "it stores data and you can
@@ -106,12 +111,16 @@ exact numbers will vary by hardware.*
 
 **Compression** — bytes per point, raw vs. compressed:
 
+<img src="docs/images/compression_comparison.svg" width="560" alt="Bar chart comparing naive 16 bytes/point storage against Gorilla-compressed storage: 3.74 bytes/point for regular-cadence metrics, 7.11 bytes/point for smooth-drift metrics">
+
 | | Naive (uncompressed) | Strata (Gorilla) |
 |---|---|---|
 | Regular-cadence metrics | 16.0 B/pt | 3.74 B/pt (4.3x smaller) |
 | Smooth-drift metrics | 16.0 B/pt | 7.11 B/pt (2.25x smaller) |
 
 **Cardinality scaling** — the headline result:
+
+<img src="docs/images/cardinality_latency.svg" width="560" alt="Line chart showing p50 lookup latency stays roughly flat (291ns to 500ns) as unique label combinations grow from 1,000 to 1,000,000">
 
 | Unique label combos | Index size | Lookup latency (p50 / p99) |
 |---|---|---|
@@ -138,6 +147,8 @@ data loss beyond what hadn't been durably written yet.
 32 concurrent writer threads, because every write is durably fsync'd to
 disk before it's acknowledged — the honest ceiling of a durability-first
 design, not a bottleneck that was missed.
+
+<img src="docs/images/throughput_concurrency.svg" width="560" alt="Line chart showing write throughput staying flat around 46,500 to 48,920 points per second regardless of concurrent writer thread count from 1 to 32">
 
 ## Engineering tradeoffs
 

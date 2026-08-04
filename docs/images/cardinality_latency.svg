@@ -1,0 +1,48 @@
+<svg viewBox="0 0 520 340" xmlns="http://www.w3.org/2000/svg" font-family="system-ui, -apple-system, Segoe UI, sans-serif">
+  <rect x="0" y="0" width="520" height="340" rx="10" fill="#fcfcfb"/>
+  <text x="24" y="30" font-size="15" font-weight="600" fill="#0b0b0b">Query latency stays flat as cardinality grows 1000x</text>
+  <text x="24" y="48" font-size="11" fill="#898781">p50 lookup latency (nanoseconds), single-label filter, 1K to 1M unique series</text>
+
+  <!-- gridlines -->
+  <line x1="50" y1="270" x2="490" y2="270" stroke="#c3c2b7" stroke-width="1"/>
+  <g stroke="#e1e0d9" stroke-width="1">
+    <line x1="50" y1="217.5" x2="490" y2="217.5"/>
+    <line x1="50" y1="165" x2="490" y2="165"/>
+    <line x1="50" y1="112.5" x2="490" y2="112.5"/>
+    <line x1="50" y1="60" x2="490" y2="60"/>
+  </g>
+  <g font-size="10" fill="#898781" text-anchor="end">
+    <text x="44" y="273">0</text>
+    <text x="44" y="220">150</text>
+    <text x="44" y="168">300</text>
+    <text x="44" y="115">450</text>
+    <text x="44" y="63">600 ns</text>
+  </g>
+
+  <!-- line -->
+  <polyline points="50,168.15 196.7,182.5 343.3,124.05 490,95" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+
+  <!-- points + surface ring + direct labels -->
+  <g>
+    <circle cx="50" cy="168.15" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+    <text x="50" y="150" font-size="11" font-weight="600" fill="#0b0b0b" text-anchor="middle">291 ns</text>
+
+    <circle cx="196.7" cy="182.5" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+    <text x="196.7" y="200" font-size="11" font-weight="600" fill="#0b0b0b" text-anchor="middle">250 ns</text>
+
+    <circle cx="343.3" cy="124.05" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+    <text x="343.3" y="106" font-size="11" font-weight="600" fill="#0b0b0b" text-anchor="middle">417 ns</text>
+
+    <circle cx="490" cy="95" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+    <text x="482" y="88" font-size="11" font-weight="600" fill="#0b0b0b" text-anchor="end">500 ns</text>
+  </g>
+
+  <!-- x axis labels -->
+  <g font-size="11" fill="#52514e" text-anchor="middle">
+    <text x="50" y="295">1,000</text>
+    <text x="196.7" y="295">10,000</text>
+    <text x="343.3" y="295">100,000</text>
+    <text x="490" y="295">1,000,000</text>
+  </g>
+  <text x="270" y="318" font-size="10" fill="#898781" text-anchor="middle">unique label combinations (log scale)</text>
+</svg>
