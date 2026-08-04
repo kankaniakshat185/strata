@@ -268,6 +268,77 @@ a claim about worst-case query latency, not just typical-case.
 
 ---
 
+## Phase 5 — Query router
+
+**`RunQuery` is a free function taking explicit state (manifest, index,
+memtable), not an `Engine` method with the logic inline** — `Engine::Query`
+is a one-line wrapper passing its own members. Same reasoning as
+`Compactor` in Phase 3: it makes the router testable against hand-built
+on-disk fixtures ([tests/test_query.cpp](tests/test_query.cpp)) without
+spinning up a live `Engine` or writing through the real ingest path.
+
+**The live MemTable is always included in query results, with no
+block-level pruning.** STRATA_DESIGN.md's query-router diagram only shows
+L0/L1 as read targets, but excluding the MemTable would mean a query for
+"the last 10 minutes" silently misses whatever hasn't been flushed yet —
+a correctness gap a reader would notice immediately, not a subtle one. It
+costs nothing extra: the MemTable is already resident, so there's no
+"block" to decide whether to skip.
+
+**"Stitch" means returning both resolutions side by side, not merging
+them into one.** A `SeriesQueryResult` carries both `raw_points` (from L0
+and the MemTable) and `rollup_buckets` (from L1) as separate lists; a
+query spanning both levels populates both rather than the router trying
+to fabricate one uniform resolution across the boundary. Matches how
+production systems actually surface this — resolution changing as data
+ages is the point, not something to hide from the caller.
+
+**Pruning happens at block granularity, not within a block.** A block
+whose header `[min_timestamp, max_timestamp]` doesn't overlap the query
+range is skipped without ever being decoded (checked via
+`SummarizeL0Block`/`SummarizeL1Block`, header + index only). A block that
+*does* overlap gets fully decoded (`ReadL0Block`/`ReadL1Block` — every
+series in it, not just the ones the query matched) and filtered down
+afterward. STRATA_DESIGN.md's checkpoint measures "confirm no unnecessary
+scans" at the level of *which blocks* get touched at all, which is what
+the 10min/1day/90day benchmark demonstrates; skipping the decode of
+non-matching series *within* an already-relevant block would be a real
+future optimization, just not what this checkpoint is about.
+
+**Bug found and fixed while building the query-bench demo: a live
+`Engine`'s in-memory MANIFEST goes stale if compaction runs against the
+same data directory out-of-band.** `Engine` caches its manifest in memory
+and only writes it out (never re-reads it) on `Flush()`. Calling
+`RunCompaction` directly while an `Engine` is still open on the same
+`data_dir` — which the first draft of the query-bench tool did, to build
+100 days of data in one process — let the compactor correctly update
+MANIFEST and delete superseded L0 blocks on disk, but the engine's stale
+in-memory copy still listed the old (now-deleted) block. The next
+`Flush()` appended to that stale copy and wrote it back out, silently
+reverting the compactor's swap and leaving `Engine::Stats()`/`Query()`
+pointing at a deleted file (a `std::runtime_error: L0: open failed` at
+query time is how this actually surfaced). Fixed by not holding one
+`Engine` open across compaction calls in the tool — each day's write+flush
+and each compaction run get their own `Engine`/`RunCompaction` call,
+matching the *intended* usage pattern from Phase 3 (compaction as a
+separate invocation against the same on-disk state, never interleaved
+inside the same process as an open writer) rather than fighting it. A real
+concurrent design would need `Engine` to either own compaction directly or
+reload MANIFEST before trusting it; out of scope for now, but worth
+flagging clearly since it's the kind of bug that's silent until a query
+happens to land on the wrong block.
+
+Query-bench results (100 synthetic days, last 2 days hot in L0, everything
+older compacted to one L1 block per day): a 10-minute and even a literal
+1-day lookback both land entirely inside the 2 hot L0 blocks and never
+touch any of the 98 L1 blocks; a 3-day lookback genuinely stitches (2 L0
+blocks + 1 L1 block, both `raw_points` and `rollup_buckets` populated); a
+90-day lookback correctly scans 88 of 98 L1 blocks and skips the 10
+outside the window. Confirms the router's pruning does what it's supposed
+to at every range scale the checkpoint asks about.
+
+---
+
 ## Git
 
 The repo is committed per phase as each phase's checkpoint passes, so

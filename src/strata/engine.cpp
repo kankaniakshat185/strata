@@ -107,4 +107,10 @@ std::vector<uint64_t> Engine::QuerySeries(
   return catalog_->Index().IntersectQuery(label_kvs);
 }
 
+QueryResult Engine::Query(const std::vector<std::string>& label_kvs,
+                           int64_t start_ms, int64_t end_ms) const {
+  return RunQuery(data_dir_, manifest_, catalog_->Index(), memtable_,
+                   label_kvs, start_ms, end_ms);
+}
+
 }  // namespace strata

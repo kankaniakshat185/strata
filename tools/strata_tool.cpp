@@ -9,6 +9,7 @@
 // tests/phase1_crash_recovery.sh.
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <random>
@@ -216,6 +217,96 @@ void RunCardinalityBench() {
   }
 }
 
+// Phase 5 checkpoint: query latency at 10min/1day/90day ranges, "confirm
+// no unnecessary scans." Builds ~100 days of data, one L0 flush per day,
+// immediately compacted into its own L1 block except for the last 2 days
+// (left as "hot" L0 data) -- so different range queries genuinely differ
+// in how many blocks they need to touch, instead of trivially scanning
+// "the one block that exists."
+//
+// Each day's write+flush and each compaction run open and close their own
+// Engine/RunCompaction call rather than sharing one long-lived Engine --
+// a live Engine caches MANIFEST in memory, and compaction (by design, see
+// ARCHITECTURE.md's Phase 3 notes) is meant to run as a separate
+// invocation against the same on-disk state, not interleaved inside the
+// same process as an open writer. Sharing one Engine across compaction
+// calls hits exactly that: the engine's stale in-memory manifest
+// overwrites the compactor's correct one on the next flush, orphaning
+// the block compaction just wrote. Reopening per step is what a real
+// separate `write` process and a separate `compact` process would do
+// naturally.
+void RunQueryBench(const std::string& data_dir) {
+  std::system(("rm -rf " + data_dir).c_str());
+
+  constexpr int64_t kDayMs = 86400000;
+  constexpr int64_t kBaseTs = 1700000000000;
+  constexpr int kNumDays = 100;
+  constexpr int kPointsPerDay = 288;  // one every 5 minutes
+  const char* kHosts[3] = {"h0", "h1", "h2"};
+
+  for (int day = 0; day < kNumDays; ++day) {
+    {
+      strata::Engine engine(data_dir, /*flush_threshold=*/1'000'000'000);
+      int64_t day_start = kBaseTs + int64_t(day) * kDayMs;
+      for (int h = 0; h < 3; ++h) {
+        std::string labels = strata::CanonicalLabelString({
+            {"host", kHosts[h]}, {"metric", "cpu_usage"}, {"region", "us-east"}});
+        for (int p = 0; p < kPointsPerDay; ++p) {
+          int64_t ts = day_start + int64_t(p) * (kDayMs / kPointsPerDay);
+          double value = 40.0 + h * 5.0 + std::sin(double(p) / 20.0) * 3.0;
+          engine.Write(labels, ts, value);
+        }
+      }
+      engine.Flush();
+    }  // engine destroyed: its in-memory manifest is gone, disk is authoritative
+
+    if (day <= kNumDays - 3) {
+      // Only the block just flushed is live and old data has already
+      // been compacted away, so this always compacts exactly today's
+      // block into its own 1-day L1 block.
+      strata::RunCompaction(data_dir, /*bucket_width_ms=*/3600000,
+                             /*min_age_seconds=*/0);
+    }
+  }
+
+  {
+    strata::Engine engine(data_dir);  // fresh open, reads current disk state
+    int64_t now = kBaseTs + int64_t(kNumDays) * kDayMs;
+
+    auto RunAndPrint = [&](const char* name, int64_t start, int64_t end) {
+      auto t0 = std::chrono::steady_clock::now();
+      strata::QueryResult r =
+          engine.Query({"host=h0", "metric=cpu_usage", "region=us-east"},
+                       start, end);
+      auto t1 = std::chrono::steady_clock::now();
+      double us = std::chrono::duration<double, std::micro>(t1 - t0).count();
+
+      uint64_t raw = 0, rollup = 0;
+      for (const auto& sr : r.series) {
+        raw += sr.raw_points.size();
+        rollup += sr.rollup_buckets.size();
+      }
+      std::printf(
+          "query-bench: %-14s latency=%8.1fus l0(scan/skip)=%u/%u "
+          "l1(scan/skip)=%u/%u raw_points=%llu rollup_buckets=%llu\n",
+          name, us, r.stats.l0_blocks_scanned, r.stats.l0_blocks_skipped,
+          r.stats.l1_blocks_scanned, r.stats.l1_blocks_skipped,
+          static_cast<unsigned long long>(raw),
+          static_cast<unsigned long long>(rollup));
+    };
+
+    // The last 2 full days are still hot L0, so a literal 10min or 1day
+    // lookback both land entirely inside L0 -- itself a real, worth-
+    // reporting result: short/medium queries never touch L1 at all, no
+    // matter how much history sits there. 3day reaches back into
+    // yesterday's L1 block, genuinely exercising the stitch path.
+    RunAndPrint("10min", now - 10 * 60 * 1000, now);
+    RunAndPrint("1day", now - 1LL * kDayMs, now);
+    RunAndPrint("3day_stitch", now - 3LL * kDayMs, now);
+    RunAndPrint("90day", now - 90LL * kDayMs, now);
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -231,8 +322,9 @@ int main(int argc, char** argv) {
         "       %s recover <data_dir>\n"
         "       %s bench <data_dir>\n"
         "       %s compact <data_dir> [bucket_width_ms] [min_age_seconds]\n"
-        "       %s cardbench\n",
-        argv[0], argv[0], argv[0], argv[0], argv[0]);
+        "       %s cardbench\n"
+        "       %s query-bench <data_dir>\n",
+        argv[0], argv[0], argv[0], argv[0], argv[0], argv[0]);
     return 2;
   }
 
@@ -253,6 +345,8 @@ int main(int argc, char** argv) {
     int64_t bucket_width_ms = argc > 3 ? std::strtoll(argv[3], nullptr, 10) : 60000;
     int64_t min_age_seconds = argc > 4 ? std::strtoll(argv[4], nullptr, 10) : 0;
     RunCompact(data_dir, bucket_width_ms, min_age_seconds);
+  } else if (mode == "query-bench") {
+    RunQueryBench(data_dir);
   } else {
     std::fprintf(stderr, "unknown mode: %s\n", mode.c_str());
     return 2;

@@ -7,6 +7,7 @@
 
 #include "strata/manifest.hpp"
 #include "strata/memtable.hpp"
+#include "strata/query_router.hpp"
 #include "strata/series_catalog.hpp"
 #include "strata/wal.hpp"
 
@@ -51,6 +52,12 @@ class Engine {
   // carrying all of them, via the inverted index. See inverted_index.hpp.
   std::vector<uint64_t> QuerySeries(
       const std::vector<std::string>& label_kvs) const;
+
+  // Resolves `label_kvs` and returns matching data in [start_ms, end_ms),
+  // routed to L0/L1/both by range and pruned at the block level. See
+  // query_router.hpp.
+  QueryResult Query(const std::vector<std::string>& label_kvs,
+                     int64_t start_ms, int64_t end_ms) const;
 
  private:
   std::string WalPath() const;
