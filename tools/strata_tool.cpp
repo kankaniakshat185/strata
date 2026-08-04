@@ -18,6 +18,7 @@
 
 #include "strata/compactor.hpp"
 #include "strata/engine.hpp"
+#include "strata/fault_injection.hpp"
 #include "strata/fsutil.hpp"
 #include "strata/inverted_index.hpp"
 #include "strata/l0_writer.hpp"
@@ -307,11 +308,66 @@ void RunQueryBench(const std::string& data_dir) {
   }
 }
 
+// Phase 6 checkpoint: deterministic crash-recovery scenarios, driven by
+// tests/phase6_crash_recovery.sh which sets STRATA_CRASH_AT before
+// launching this. Each scenario does the minimum setup needed to reach
+// the named MaybeCrash() call inside Engine::Flush() or RunCompaction();
+// if the env var doesn't match (e.g. run directly without the harness),
+// it just completes normally -- useful for confirming the setup itself
+// is correct before wiring in the actual kill.
+void RunCrashTest(const std::string& point, const std::string& data_dir) {
+  std::system(("rm -rf " + data_dir).c_str());
+  const std::string labels = "host=h0,metric=cpu_usage,region=us-east";
+  constexpr int64_t kBaseTs = 1700000000000;
+
+  if (point == "mid_memtable_buildup") {
+    strata::Engine engine(data_dir, /*flush_threshold=*/1'000'000'000);
+    for (int i = 0; i < 500; ++i) {
+      engine.Write(labels, kBaseTs + i, double(i));
+    }
+    strata::MaybeCrash(point.c_str());
+  } else if (point == "post_l0_write_pre_manifest" ||
+             point == "post_manifest_pre_wal_unlink") {
+    strata::Engine engine(data_dir, /*flush_threshold=*/100);
+    for (int i = 0; i < 100; ++i) {
+      // The 100th write crosses flush_threshold and triggers Flush()
+      // internally, which fires the matching MaybeCrash() itself.
+      engine.Write(labels, kBaseTs + i, double(i));
+    }
+  } else if (point == "post_l1_write_pre_manifest_rename" ||
+             point == "post_manifest_rename_pre_l0_delete") {
+    {
+      strata::Engine engine(data_dir, /*flush_threshold=*/50);
+      for (int i = 0; i < 50; ++i) {
+        engine.Write(labels, kBaseTs + i, double(i));
+      }
+    }  // flush already happened via threshold; engine closed cleanly first
+    strata::RunCompaction(data_dir, /*bucket_width_ms=*/60000,
+                          /*min_age_seconds=*/0);
+  } else {
+    std::fprintf(stderr, "unknown crash point: %s\n", point.c_str());
+    std::exit(2);
+  }
+
+  std::printf(
+      "crashtest: %s completed without crashing "
+      "(STRATA_CRASH_AT not set to this point?)\n",
+      point.c_str());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   if (argc >= 2 && std::string(argv[1]) == "cardbench") {
     RunCardinalityBench();
+    return 0;
+  }
+  if (argc >= 2 && std::string(argv[1]) == "crashtest") {
+    if (argc < 4) {
+      std::fprintf(stderr, "crashtest requires <point> <data_dir>\n");
+      return 2;
+    }
+    RunCrashTest(argv[2], argv[3]);
     return 0;
   }
 
@@ -323,8 +379,9 @@ int main(int argc, char** argv) {
         "       %s bench <data_dir>\n"
         "       %s compact <data_dir> [bucket_width_ms] [min_age_seconds]\n"
         "       %s cardbench\n"
-        "       %s query-bench <data_dir>\n",
-        argv[0], argv[0], argv[0], argv[0], argv[0], argv[0]);
+        "       %s query-bench <data_dir>\n"
+        "       %s crashtest <point> <data_dir>\n",
+        argv[0], argv[0], argv[0], argv[0], argv[0], argv[0], argv[0]);
     return 2;
   }
 

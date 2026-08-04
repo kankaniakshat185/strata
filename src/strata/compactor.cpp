@@ -7,6 +7,7 @@
 #include <map>
 #include <unistd.h>
 
+#include "strata/fault_injection.hpp"
 #include "strata/fsutil.hpp"
 #include "strata/l0_writer.hpp"
 #include "strata/l1_writer.hpp"
@@ -122,6 +123,15 @@ CompactionResult RunCompaction(const std::string& data_dir,
 
   WriteL1Block(l1_path, l1_series);
 
+  // A crash here (Phase 6: "post_l1_write_pre_manifest_rename") leaves a
+  // fully valid new L1 block on disk that the *old* MANIFEST (still
+  // pointing at the original L0 blocks) doesn't know about. On restart,
+  // orphan cleanup deletes the unlisted L1 file; the old L0 blocks are
+  // still manifest-live and untouched, so no data was ever at risk --
+  // compaction simply didn't happen and is safe to retry, exactly as
+  // STRATA_DESIGN.md's MANIFEST section describes.
+  MaybeCrash("post_l1_write_pre_manifest_rename");
+
   Manifest new_manifest = manifest;
   new_manifest.l0_blocks.erase(
       std::remove_if(new_manifest.l0_blocks.begin(),
@@ -134,6 +144,15 @@ CompactionResult RunCompaction(const std::string& data_dir,
   new_manifest.l1_blocks.push_back(l1_name);
 
   WriteManifestAtomic(data_dir + "/MANIFEST", new_manifest);
+
+  // A crash here (Phase 6: "post_manifest_rename_pre_l0_delete") leaves
+  // the new MANIFEST already pointing at the new L1 block and no longer
+  // listing the old L0 blocks -- but those L0 files are still sitting on
+  // disk. On restart, orphan cleanup deletes them (they're not
+  // manifest-live), finishing the job this crashed compaction didn't.
+  // No data loss (L1 already has the correct rollups) and nothing leaks
+  // forever.
+  MaybeCrash("post_manifest_rename_pre_l0_delete");
 
   // Only after the manifest swap is durable do we delete the superseded
   // L0 blocks -- a crash before this point just leaves them for the next

@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "strata/fault_injection.hpp"
 #include "strata/fsutil.hpp"
 #include "strata/l0_writer.hpp"
 #include "strata/l1_writer.hpp"
@@ -67,6 +68,13 @@ void Engine::Flush() {
   WriteL0Block(path, memtable_);
   memtable_.Clear();
 
+  // A crash here (Phase 6: "post_l0_write_pre_manifest") leaves a valid,
+  // fsynced L0 block on disk that the *old* MANIFEST doesn't list yet.
+  // On restart, LoadOrBootstrapManifest's orphan cleanup deletes it (safe
+  // -- it's redundant with the WAL, which hasn't been touched) and WAL
+  // replay recovers every point. No loss.
+  MaybeCrash("post_l0_write_pre_manifest");
+
   // Register the new block as live before resetting the WAL. Known
   // simplification, same gap as before MANIFEST existed: a crash between
   // the L0 fsync above and the WAL reset below leaves those points in
@@ -77,6 +85,14 @@ void Engine::Flush() {
   size_t slash = path.find_last_of('/');
   manifest_.l0_blocks.push_back(path.substr(slash + 1));
   WriteManifestAtomic(data_dir_ + "/MANIFEST", manifest_);
+
+  // A crash here (Phase 6: "post_manifest_pre_wal_unlink") is exactly the
+  // gap named above: MANIFEST now lists the new L0 block *and* the WAL
+  // (not yet unlinked) still has those same records. Restart replays them
+  // again -- the documented duplicate-points outcome, formally verified
+  // by tests/phase6_crash_recovery.sh rather than just asserted in
+  // ARCHITECTURE.md.
+  MaybeCrash("post_manifest_pre_wal_unlink");
 
   wal_.reset();
   std::string wal_path = WalPath();

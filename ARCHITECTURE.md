@@ -339,6 +339,55 @@ to at every range scale the checkpoint asks about.
 
 ---
 
+## Phase 6 — Formal crash-recovery testing
+
+**Deterministic fault injection (self-inflicted `SIGKILL` at a named code
+point) instead of timing an external kill.** Phase 1's harness
+([tests/phase1_crash_recovery.sh](tests/phase1_crash_recovery.sh)) starts
+a burst write, sleeps, and sends `SIGKILL` from outside — good enough to
+prove the WAL-replay mechanism works in general, but the specific windows
+Phase 6 needs to hit (e.g. "after the new L0 block is fsynced but before
+MANIFEST is updated") are a few statements wide, sub-millisecond. An
+external process racing a `sleep` against that has no realistic chance of
+landing inside it. [fault_injection.hpp](src/strata/fault_injection.hpp)
+instruments each exact point with `MaybeCrash(name)`: if the environment
+variable `STRATA_CRASH_AT` matches, the process sends *itself* a real
+`kill(getpid(), SIGKILL)` right there — a no-op otherwise. This is the
+standard technique for testing narrow crash windows in real storage
+engines (RocksDB's SyncPoint, TiKV/etcd fail-points are the same idea);
+worth being upfront that it's white-box (the code has to be instrumented
+in advance) rather than black-box, in exchange for actually being able to
+hit the window every single time.
+
+**Five named crash points, chosen to each formally verify a specific
+claim already made in this file, not just to re-test what Phase 1
+covered.** Two in `Engine::Flush()` (`post_l0_write_pre_manifest`,
+`post_manifest_pre_wal_unlink` — the exact gap flagged in Phase 1's and
+Phase 3's notes), two in `RunCompaction()`
+(`post_l1_write_pre_manifest_rename`, `post_manifest_rename_pre_l0_delete`
+— the MANIFEST swap sequence STRATA_DESIGN.md's crash-safety section
+describes), and `mid_memtable_buildup` (no flush at all — pure WAL replay).
+[tests/phase6_crash_recovery.sh](tests/phase6_crash_recovery.sh) drives
+all five and asserts the *exact* expected recovery numbers per point, not
+just "didn't crash":
+
+| Point | Result |
+|---|---|
+| `mid_memtable_buildup` | All 500 points recovered from WAL alone, 0 blocks |
+| `post_l0_write_pre_manifest` | Orphaned L0 block cleaned up; all 100 points recovered via WAL — no loss |
+| `post_manifest_pre_wal_unlink` | 100 points → 200 after recovery (100 in L0 + 100 replayed) — **confirms the documented duplicate-points gap is real, and bounded exactly as described, not silently worse** |
+| `post_l1_write_pre_manifest_rename` | Orphaned L1 block cleaned up; original 50 points intact via the untouched L0 block; re-running `compact` afterward succeeds cleanly |
+| `post_manifest_rename_pre_l0_delete` | Superseded L0 block cleaned up; data already correctly live via the new L1 block |
+
+Every scenario: no corruption, no loss beyond what was already
+in-flight and undurable at the moment of the kill — the two scenarios
+that *do* show a side effect (an orphaned block, or duplicated points)
+show exactly the side effect already predicted in Phases 1 and 3's notes,
+which is the actual point of this phase: proving the earlier trade-offs
+were correctly reasoned about, not just asserting they were.
+
+---
+
 ## Git
 
 The repo is committed per phase as each phase's checkpoint passes, so
