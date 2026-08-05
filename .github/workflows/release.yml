@@ -1,0 +1,30 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+
+      - name: Build
+        run: make all
+
+      - name: Package
+        run: |
+          mkdir -p release
+          cp build/strata_tool release/
+          tar -czf strata_tool-linux-x86_64.tar.gz -C release strata_tool
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: strata_tool-linux-x86_64.tar.gz
+          generate_release_notes: true

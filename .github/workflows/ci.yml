@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang
+
+      - name: Build and run unit tests
+        run: make test
+
+      - name: Timed crash-recovery test (external SIGKILL)
+        run: |
+          chmod +x tests/phase1_crash_recovery.sh
+          ./tests/phase1_crash_recovery.sh
+
+      - name: Deterministic crash-recovery tests (fault injection)
+        run: |
+          chmod +x tests/phase6_crash_recovery.sh
+          ./tests/phase6_crash_recovery.sh

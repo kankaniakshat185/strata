@@ -1,5 +1,7 @@
 # Strata
 
+[![CI](https://github.com/VaishnaviRai287/Strata/actions/workflows/ci.yml/badge.svg)](https://github.com/VaishnaviRai287/Strata/actions/workflows/ci.yml)
+
 **A tiered-resolution time-series database, built from scratch in C++.**
 
 Strata ingests high-frequency metrics (server CPU, IoT sensors, request
