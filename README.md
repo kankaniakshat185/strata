@@ -1,6 +1,6 @@
 # Strata
 
-[![CI](https://github.com/VaishnaviRai287/Strata/actions/workflows/ci.yml/badge.svg)](https://github.com/VaishnaviRai287/Strata/actions/workflows/ci.yml)
+[![CI](https://github.com/kankaniakshat185/strata/actions/workflows/ci.yml/badge.svg)](https://github.com/kankaniakshat185/strata/actions/workflows/ci.yml)
 
 **A tiered-resolution time-series database, built from scratch in C++.**
 
