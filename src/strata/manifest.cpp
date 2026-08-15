@@ -5,6 +5,8 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cassert>
+#include <cctype>
 #include <cerrno>
 #include <cstring>
 #include <sstream>
@@ -13,6 +15,16 @@
 #include "strata/fsutil.hpp"
 
 namespace strata {
+
+std::vector<std::string>& Manifest::RollupBlocks(int level) {
+  assert(level >= 1 && level <= kNumRollupLevels);
+  return rollup_levels[level - 1];
+}
+
+const std::vector<std::string>& Manifest::RollupBlocks(int level) const {
+  assert(level >= 1 && level <= kNumRollupLevels);
+  return rollup_levels[level - 1];
+}
 
 namespace {
 
@@ -38,6 +50,34 @@ std::string ReadWholeFile(const std::string& path) {
   return data;
 }
 
+// Parses "L<n>" into n (0 for L0, 1..kNumRollupLevels for rollup
+// levels). Throws on anything else -- an earlier version of this parser
+// silently dropped unrecognized level tokens, which would have quietly
+// lost data the moment a level this binary didn't know about showed up
+// in a MANIFEST it read. Loud and wrong beats quiet and wrong here.
+int ParseLevelToken(const std::string& token, const std::string& path) {
+  if (token.size() < 2 || token[0] != 'L') {
+    throw std::runtime_error("Manifest: unrecognized level token '" + token +
+                              "' in " + path);
+  }
+  for (size_t i = 1; i < token.size(); ++i) {
+    if (!std::isdigit(static_cast<unsigned char>(token[i]))) {
+      throw std::runtime_error("Manifest: unrecognized level token '" +
+                                token + "' in " + path);
+    }
+  }
+  int level = std::stoi(token.substr(1));
+  if (level < 0 || level > kNumRollupLevels) {
+    throw std::runtime_error("Manifest: level '" + token +
+                              "' out of range in " + path);
+  }
+  return level;
+}
+
+std::string LevelDir(const std::string& data_dir, int level) {
+  return data_dir + "/L" + std::to_string(level);
+}
+
 }  // namespace
 
 Manifest LoadManifest(const std::string& path) {
@@ -45,12 +85,13 @@ Manifest LoadManifest(const std::string& path) {
   if (!FileExists(path)) return m;
 
   std::istringstream iss(ReadWholeFile(path));
-  std::string level, name;
-  while (iss >> level >> name) {
-    if (level == "L0") {
+  std::string level_token, name;
+  while (iss >> level_token >> name) {
+    int level = ParseLevelToken(level_token, path);
+    if (level == 0) {
       m.l0_blocks.push_back(name);
-    } else if (level == "L1") {
-      m.l1_blocks.push_back(name);
+    } else {
+      m.RollupBlocks(level).push_back(name);
     }
   }
   return m;
@@ -61,7 +102,11 @@ void WriteManifestAtomic(const std::string& path, const Manifest& manifest) {
 
   std::ostringstream oss;
   for (const auto& name : manifest.l0_blocks) oss << "L0 " << name << "\n";
-  for (const auto& name : manifest.l1_blocks) oss << "L1 " << name << "\n";
+  for (int level = 1; level <= kNumRollupLevels; ++level) {
+    for (const auto& name : manifest.RollupBlocks(level)) {
+      oss << "L" << level << " " << name << "\n";
+    }
+  }
   std::string content = oss.str();
 
   int fd = ::open(tmp_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -90,18 +135,22 @@ Manifest LoadOrBootstrapManifest(const std::string& data_dir) {
 
   Manifest m;
   if (!FileExists(path)) {
-    // First run, or data written before Phase 3: treat everything
-    // currently on disk as live and persist that as the initial manifest.
-    m.l0_blocks = ListFilesWithSuffix(data_dir + "/L0", ".blk");
-    m.l1_blocks = ListFilesWithSuffix(data_dir + "/L1", ".blk");
+    // First run, or data written before MANIFEST existed: treat
+    // everything currently on disk as live and persist that as the
+    // initial manifest.
+    m.l0_blocks = ListFilesWithSuffix(LevelDir(data_dir, 0), ".blk");
+    for (int level = 1; level <= kNumRollupLevels; ++level) {
+      m.RollupBlocks(level) =
+          ListFilesWithSuffix(LevelDir(data_dir, level), ".blk");
+    }
     WriteManifestAtomic(path, m);
   } else {
     m = LoadManifest(path);
   }
 
   // Cleanup: delete any block file on disk that the manifest doesn't know
-  // about -- the leftover from a new L1 block whose compaction crashed
-  // before the MANIFEST rename made it official.
+  // about -- the leftover from a new rollup block whose compaction
+  // crashed before the MANIFEST rename made it official.
   auto Cleanup = [](const std::string& dir,
                      const std::vector<std::string>& live) {
     for (const auto& name : ListFilesWithSuffix(dir, ".blk")) {
@@ -110,8 +159,10 @@ Manifest LoadOrBootstrapManifest(const std::string& data_dir) {
       }
     }
   };
-  Cleanup(data_dir + "/L0", m.l0_blocks);
-  Cleanup(data_dir + "/L1", m.l1_blocks);
+  Cleanup(LevelDir(data_dir, 0), m.l0_blocks);
+  for (int level = 1; level <= kNumRollupLevels; ++level) {
+    Cleanup(LevelDir(data_dir, level), m.RollupBlocks(level));
+  }
 
   return m;
 }

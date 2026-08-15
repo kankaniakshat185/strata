@@ -16,6 +16,52 @@ bool Overlaps(int64_t block_min, int64_t block_max, int64_t start_ms,
   return block_min < end_ms && block_max >= start_ms;
 }
 
+// Scans every live block at one rollup level, pruning by time range
+// before decoding (same shape as the L0 loop below), and appends
+// matching buckets into whichever SeriesQueryResult field `out_field`
+// points at. Shared across L1/L2/L3 -- they only differ in which level
+// byte to expect, which directory to read, and which output field to
+// fill, all passed in explicitly rather than duplicating this ~20-line
+// loop three times.
+void ScanRollupLevel(const std::string& data_dir, int rollup_level,
+                      const Manifest& manifest,
+                      std::unordered_map<uint64_t, SeriesQueryResult*>& by_id,
+                      int64_t start_ms, int64_t end_ms,
+                      std::vector<RollupBucket> SeriesQueryResult::*out_field,
+                      uint32_t& scanned, uint32_t& skipped) {
+  std::string dir = data_dir + "/L" + std::to_string(rollup_level) + "/";
+  for (const auto& name : manifest.RollupBlocks(rollup_level)) {
+    std::string path = dir + name;
+    L1Summary summary =
+        SummarizeL1Block(path, static_cast<uint8_t>(rollup_level));
+    if (!Overlaps(summary.min_timestamp, summary.max_timestamp, start_ms,
+                  end_ms)) {
+      ++skipped;
+      continue;
+    }
+    ++scanned;
+
+    std::vector<L1SeriesRollup> rollups =
+        ReadL1Block(path, static_cast<uint8_t>(rollup_level));
+    for (const auto& r : rollups) {
+      auto it = by_id.find(r.series_id);
+      if (it == by_id.end()) continue;
+      for (const auto& b : r.buckets) {
+        if (b.bucket_start >= start_ms && b.bucket_start < end_ms) {
+          (it->second->*out_field).push_back(b);
+        }
+      }
+    }
+  }
+}
+
+void SortByBucketStart(std::vector<RollupBucket>& buckets) {
+  std::sort(buckets.begin(), buckets.end(),
+            [](const RollupBucket& a, const RollupBucket& b) {
+              return a.bucket_start < b.bucket_start;
+            });
+}
+
 }  // namespace
 
 QueryResult RunQuery(const std::string& data_dir, const Manifest& manifest,
@@ -26,7 +72,11 @@ QueryResult RunQuery(const std::string& data_dir, const Manifest& manifest,
 
   std::vector<uint64_t> matched = index.IntersectQuery(label_kvs);
   result.series.reserve(matched.size());
-  for (uint64_t id : matched) result.series.push_back({id, {}, {}});
+  for (uint64_t id : matched) {
+    SeriesQueryResult sr;
+    sr.series_id = id;
+    result.series.push_back(std::move(sr));
+  }
 
   std::unordered_map<uint64_t, SeriesQueryResult*> by_id;
   by_id.reserve(result.series.size());
@@ -69,32 +119,23 @@ QueryResult RunQuery(const std::string& data_dir, const Manifest& manifest,
     std::sort(sr.raw_points.begin(), sr.raw_points.end());
   }
 
-  for (const auto& name : manifest.l1_blocks) {
-    std::string path = data_dir + "/L1/" + name;
-    L1Summary summary = SummarizeL1Block(path);
-    if (!Overlaps(summary.min_timestamp, summary.max_timestamp, start_ms,
-                  end_ms)) {
-      ++result.stats.l1_blocks_skipped;
-      continue;
-    }
-    ++result.stats.l1_blocks_scanned;
+  ScanRollupLevel(data_dir, 1, manifest, by_id, start_ms, end_ms,
+                   &SeriesQueryResult::rollup_buckets_l1,
+                   result.stats.l1_blocks_scanned,
+                   result.stats.l1_blocks_skipped);
+  ScanRollupLevel(data_dir, 2, manifest, by_id, start_ms, end_ms,
+                   &SeriesQueryResult::rollup_buckets_l2,
+                   result.stats.l2_blocks_scanned,
+                   result.stats.l2_blocks_skipped);
+  ScanRollupLevel(data_dir, 3, manifest, by_id, start_ms, end_ms,
+                   &SeriesQueryResult::rollup_buckets_l3,
+                   result.stats.l3_blocks_scanned,
+                   result.stats.l3_blocks_skipped);
 
-    std::vector<L1SeriesRollup> rollups = ReadL1Block(path);
-    for (const auto& r : rollups) {
-      auto it = by_id.find(r.series_id);
-      if (it == by_id.end()) continue;
-      for (const auto& b : r.buckets) {
-        if (b.bucket_start >= start_ms && b.bucket_start < end_ms) {
-          it->second->rollup_buckets.push_back(b);
-        }
-      }
-    }
-  }
   for (auto& sr : result.series) {
-    std::sort(sr.rollup_buckets.begin(), sr.rollup_buckets.end(),
-              [](const RollupBucket& a, const RollupBucket& b) {
-                return a.bucket_start < b.bucket_start;
-              });
+    SortByBucketStart(sr.rollup_buckets_l1);
+    SortByBucketStart(sr.rollup_buckets_l2);
+    SortByBucketStart(sr.rollup_buckets_l3);
   }
 
   return result;

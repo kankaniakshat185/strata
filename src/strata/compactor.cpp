@@ -7,6 +7,7 @@
 #include <map>
 #include <unistd.h>
 
+#include "strata/block_format.hpp"
 #include "strata/fault_injection.hpp"
 #include "strata/fsutil.hpp"
 #include "strata/l0_writer.hpp"
@@ -53,6 +54,51 @@ RollupBucket Downsample(int64_t bucket_start, std::vector<double>& values) {
   b.avg = sum / double(values.size());
   b.p99 = Percentile(values, 0.99);  // sorts `values` as a side effect
   return b;
+}
+
+// Merges several already-downsampled buckets (e.g. multiple L1 hourly
+// buckets) into one coarser bucket (e.g. one L2 daily bucket) -- the
+// rollup-of-rollups analog of Downsample() above, used when the input is
+// summaries rather than raw points.
+//
+// count/min/max/avg all combine exactly: count sums, min/max take the
+// extremes, and a count-weighted mean of means equals the true mean.
+// p99 does not compose this way under any linear combination of
+// sub-bucket p99s -- there's no exact reconstruction of a merged
+// percentile from summaries alone (the raw points are gone by design).
+// This uses a count-weighted mean of the source p99s: simple, explains
+// itself, and consistent with how `avg` is combined -- but it has a
+// specific, worth-knowing failure mode. A low-count bucket's own p99 is
+// really just "close to its max" (nearest-rank on a handful of values
+// nearly always lands on the top one), so averaging many small buckets'
+// near-maxima -- weighted by their small counts -- drifts the estimate
+// toward the plain mean of all points, not the true 99th percentile.
+// See tests/test_rollup_compaction.cpp for a deliberate demonstration of
+// this with narrow bucket widths, rather than just asserting it's fine.
+RollupBucket MergeRollupBuckets(int64_t bucket_start,
+                                 const std::vector<RollupBucket>& sources) {
+  RollupBucket merged;
+  merged.bucket_start = bucket_start;
+
+  uint64_t total_count = 0;
+  double min_v = sources[0].min;
+  double max_v = sources[0].max;
+  double weighted_avg_sum = 0.0;
+  double weighted_p99_sum = 0.0;
+  for (const auto& s : sources) {
+    total_count += s.count;
+    if (s.min < min_v) min_v = s.min;
+    if (s.max > max_v) max_v = s.max;
+    weighted_avg_sum += s.avg * double(s.count);
+    weighted_p99_sum += s.p99 * double(s.count);
+  }
+
+  merged.count = static_cast<uint32_t>(total_count);
+  merged.min = min_v;
+  merged.max = max_v;
+  merged.avg = weighted_avg_sum / double(total_count);
+  merged.p99 = weighted_p99_sum / double(total_count);
+  return merged;
 }
 
 }  // namespace
@@ -121,7 +167,7 @@ CompactionResult RunCompaction(const std::string& data_dir,
   std::string l1_name = suffix;
   std::string l1_path = data_dir + "/L1/" + l1_name;
 
-  WriteL1Block(l1_path, l1_series);
+  WriteL1Block(l1_path, l1_series, kLevelL1);
 
   // A crash here (Phase 6: "post_l1_write_pre_manifest_rename") leaves a
   // fully valid new L1 block on disk that the *old* MANIFEST (still
@@ -141,7 +187,7 @@ CompactionResult RunCompaction(const std::string& data_dir,
                                           name) != eligible.end();
                       }),
       new_manifest.l0_blocks.end());
-  new_manifest.l1_blocks.push_back(l1_name);
+  new_manifest.RollupBlocks(1).push_back(l1_name);
 
   WriteManifestAtomic(data_dir + "/MANIFEST", new_manifest);
 
@@ -167,6 +213,125 @@ CompactionResult RunCompaction(const std::string& data_dir,
   result.l0_bytes_before = l0_bytes_before;
   result.l1_bytes_after = FileSize(l1_path);
   result.l1_block_path = l1_path;
+  return result;
+}
+
+RollupCompactionResult RunRollupCompaction(const std::string& data_dir,
+                                            int source_level,
+                                            int64_t bucket_width_ms,
+                                            int64_t min_age_seconds) {
+  RollupCompactionResult result;
+  result.source_level = source_level;
+  result.target_level = source_level + 1;
+
+  Manifest manifest = LoadOrBootstrapManifest(data_dir);
+  int64_t now = NowUnixSeconds();
+
+  std::string source_dir = data_dir + "/L" + std::to_string(source_level);
+  std::vector<std::string> eligible;
+  for (const auto& name : manifest.RollupBlocks(source_level)) {
+    L1Summary summary =
+        SummarizeL1Block(source_dir + "/" + name, uint8_t(source_level));
+    int64_t age_seconds = std::max<int64_t>(0, now - summary.created_at);
+    if (age_seconds >= min_age_seconds) {
+      eligible.push_back(name);
+    }
+  }
+
+  if (eligible.empty()) return result;
+
+  // Merge source buckets per series across all eligible blocks -- reading
+  // RollupBuckets this time, not raw points, since the input is already
+  // one or two downsampling passes deep.
+  std::map<uint64_t, std::vector<RollupBucket>> merged;
+  uint64_t source_bytes_before = 0;
+  for (const auto& name : eligible) {
+    std::string path = source_dir + "/" + name;
+    source_bytes_before += FileSize(path);
+    std::vector<L1SeriesRollup> block =
+        ReadL1Block(path, uint8_t(source_level));
+    for (auto& sr : block) {
+      auto& dst = merged[sr.series_id];
+      dst.insert(dst.end(), sr.buckets.begin(), sr.buckets.end());
+      result.source_buckets_merged += sr.buckets.size();
+    }
+  }
+
+  std::vector<L1SeriesRollup> target_series;
+  target_series.reserve(merged.size());
+  for (auto& [series_id, buckets] : merged) {
+    std::sort(buckets.begin(), buckets.end(),
+              [](const RollupBucket& a, const RollupBucket& b) {
+                return a.bucket_start < b.bucket_start;
+              });
+
+    L1SeriesRollup rollup;
+    rollup.series_id = series_id;
+
+    size_t i = 0;
+    while (i < buckets.size()) {
+      int64_t bucket_start = BucketStart(buckets[i].bucket_start, bucket_width_ms);
+      int64_t bucket_end = bucket_start + bucket_width_ms;
+      std::vector<RollupBucket> group;
+      while (i < buckets.size() && buckets[i].bucket_start < bucket_end) {
+        group.push_back(buckets[i]);
+        ++i;
+      }
+      rollup.buckets.push_back(MergeRollupBuckets(bucket_start, group));
+    }
+    result.target_buckets_written += rollup.buckets.size();
+    target_series.push_back(std::move(rollup));
+  }
+
+  int target_level = source_level + 1;
+  std::string target_dir = data_dir + "/L" + std::to_string(target_level);
+  uint64_t target_id = NextBlockId(target_dir, ".blk");
+  char suffix[32];
+  std::snprintf(suffix, sizeof(suffix), "%08llu.blk",
+                static_cast<unsigned long long>(target_id));
+  std::string target_name = suffix;
+  std::string target_path = target_dir + "/" + target_name;
+
+  WriteL1Block(target_path, target_series, uint8_t(target_level));
+
+  // Same crash-safety shape as RunCompaction's post-write point, but with
+  // a level-specific name -- reusing RunCompaction's literal
+  // "post_l1_write_pre_manifest_rename" here would be actively wrong for
+  // an L2->L3 run (no L1 write happens), and would collide if a future
+  // caller ever chains L0->L1->L2->L3 in one process (MaybeCrash matches
+  // one process-global env var, so a reused name could only ever be
+  // targeted at its first occurrence).
+  std::string post_write_point =
+      "post_rollup_write_pre_manifest_rename_L" + std::to_string(target_level);
+  MaybeCrash(post_write_point.c_str());
+
+  Manifest new_manifest = manifest;
+  auto& source_list = new_manifest.RollupBlocks(source_level);
+  source_list.erase(
+      std::remove_if(source_list.begin(), source_list.end(),
+                      [&](const std::string& name) {
+                        return std::find(eligible.begin(), eligible.end(),
+                                          name) != eligible.end();
+                      }),
+      source_list.end());
+  new_manifest.RollupBlocks(target_level).push_back(target_name);
+
+  WriteManifestAtomic(data_dir + "/MANIFEST", new_manifest);
+
+  std::string post_rename_point =
+      "post_rollup_manifest_rename_pre_source_delete_L" +
+      std::to_string(target_level);
+  MaybeCrash(post_rename_point.c_str());
+
+  for (const auto& name : eligible) {
+    ::unlink((source_dir + "/" + name).c_str());
+  }
+
+  result.ran = true;
+  result.source_blocks_compacted = static_cast<uint32_t>(eligible.size());
+  result.source_bytes_before = source_bytes_before;
+  result.target_bytes_after = FileSize(target_path);
+  result.target_block_path = target_path;
   return result;
 }
 

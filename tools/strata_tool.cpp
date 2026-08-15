@@ -73,6 +73,14 @@ void RunRecover(const std::string& data_dir) {
               static_cast<unsigned long long>(stats.l1_blocks));
   std::printf("recover: l1_buckets=%llu\n",
               static_cast<unsigned long long>(stats.l1_buckets));
+  std::printf("recover: l2_blocks=%llu\n",
+              static_cast<unsigned long long>(stats.l2_blocks));
+  std::printf("recover: l2_buckets=%llu\n",
+              static_cast<unsigned long long>(stats.l2_buckets));
+  std::printf("recover: l3_blocks=%llu\n",
+              static_cast<unsigned long long>(stats.l3_blocks));
+  std::printf("recover: l3_buckets=%llu\n",
+              static_cast<unsigned long long>(stats.l3_buckets));
   std::printf("recover: total_points=%llu\n",
               static_cast<unsigned long long>(stats.memtable_points +
                                                stats.l0_points));
@@ -100,6 +108,37 @@ void RunCompact(const std::string& data_dir, int64_t bucket_width_ms,
       static_cast<unsigned long long>(r.l1_bytes_after),
       r.l1_bytes_after ? double(r.l0_bytes_before) / double(r.l1_bytes_after)
                         : 0.0);
+}
+
+void RunCompactRollup(const std::string& data_dir, int source_level,
+                       int64_t bucket_width_ms, int64_t min_age_seconds) {
+  strata::RollupCompactionResult r = strata::RunRollupCompaction(
+      data_dir, source_level, bucket_width_ms, min_age_seconds);
+
+  if (!r.ran) {
+    std::printf(
+        "compact-rollup: nothing eligible at L%d (min_age_seconds=%lld)\n",
+        source_level, static_cast<long long>(min_age_seconds));
+    return;
+  }
+
+  std::printf(
+      "compact-rollup: merged %u L%d block(s), %llu buckets -> %llu "
+      "buckets at L%d\n",
+      r.source_blocks_compacted, r.source_level,
+      static_cast<unsigned long long>(r.source_buckets_merged),
+      static_cast<unsigned long long>(r.target_buckets_written),
+      r.target_level);
+  std::printf("compact-rollup: new L%d block: %s\n", r.target_level,
+              r.target_block_path.c_str());
+  std::printf(
+      "compact-rollup: storage: %llu B (L%d) -> %llu B (L%d), %.2fx "
+      "smaller\n",
+      static_cast<unsigned long long>(r.source_bytes_before), r.source_level,
+      static_cast<unsigned long long>(r.target_bytes_after), r.target_level,
+      r.target_bytes_after
+          ? double(r.source_bytes_before) / double(r.target_bytes_after)
+          : 0.0);
 }
 
 void RunBench(const std::string& data_dir) {
@@ -286,7 +325,8 @@ void RunQueryBench(const std::string& data_dir) {
       uint64_t raw = 0, rollup = 0;
       for (const auto& sr : r.series) {
         raw += sr.raw_points.size();
-        rollup += sr.rollup_buckets.size();
+        rollup += sr.rollup_buckets_l1.size() + sr.rollup_buckets_l2.size() +
+                  sr.rollup_buckets_l3.size();
       }
       std::printf(
           "query-bench: %-14s latency=%8.1fus l0(scan/skip)=%u/%u "
@@ -425,12 +465,14 @@ int main(int argc, char** argv) {
         "       %s recover <data_dir>\n"
         "       %s bench <data_dir>\n"
         "       %s compact <data_dir> [bucket_width_ms] [min_age_seconds]\n"
+        "       %s compact-rollup <data_dir> <source_level 1|2> "
+        "[bucket_width_ms] [min_age_seconds]\n"
         "       %s cardbench\n"
         "       %s query-bench <data_dir>\n"
         "       %s crashtest <point> <data_dir>\n"
         "       %s loadtest <data_dir>\n",
         argv[0], argv[0], argv[0], argv[0], argv[0], argv[0], argv[0],
-        argv[0]);
+        argv[0], argv[0]);
     return 2;
   }
 
@@ -451,6 +493,22 @@ int main(int argc, char** argv) {
     int64_t bucket_width_ms = argc > 3 ? std::strtoll(argv[3], nullptr, 10) : 60000;
     int64_t min_age_seconds = argc > 4 ? std::strtoll(argv[4], nullptr, 10) : 0;
     RunCompact(data_dir, bucket_width_ms, min_age_seconds);
+  } else if (mode == "compact-rollup") {
+    if (argc < 4) {
+      std::fprintf(stderr, "compact-rollup requires <source_level (1|2)>\n");
+      return 2;
+    }
+    int source_level = std::atoi(argv[3]);
+    if (source_level != 1 && source_level != 2) {
+      std::fprintf(stderr,
+                    "compact-rollup: source_level must be 1 (L1->L2) or 2 "
+                    "(L2->L3), got %d\n",
+                    source_level);
+      return 2;
+    }
+    int64_t bucket_width_ms = argc > 4 ? std::strtoll(argv[4], nullptr, 10) : 86400000;
+    int64_t min_age_seconds = argc > 5 ? std::strtoll(argv[5], nullptr, 10) : 0;
+    RunCompactRollup(data_dir, source_level, bucket_width_ms, min_age_seconds);
   } else if (mode == "query-bench") {
     RunQueryBench(data_dir);
   } else if (mode == "loadtest") {

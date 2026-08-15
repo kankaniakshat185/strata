@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "strata/block_format.hpp"
 #include "strata/fault_injection.hpp"
 #include "strata/fsutil.hpp"
 #include "strata/l0_writer.hpp"
@@ -17,6 +18,8 @@ Engine::Engine(const std::string& data_dir, size_t flush_threshold)
   MakeDirs(data_dir_ + "/wal/");
   MakeDirs(data_dir_ + "/L0/");
   MakeDirs(data_dir_ + "/L1/");
+  MakeDirs(data_dir_ + "/L2/");
+  MakeDirs(data_dir_ + "/L3/");
 
   catalog_ =
       std::make_unique<SeriesCatalog>(data_dir_ + "/series_catalog.log");
@@ -122,10 +125,20 @@ EngineStats Engine::Stats() const {
     ++stats.l0_blocks;
     stats.l0_points += s.point_count;
   }
-  for (const auto& name : manifest_.l1_blocks) {
-    L1Summary s = SummarizeL1Block(data_dir_ + "/L1/" + name);
+  for (const auto& name : manifest_.RollupBlocks(1)) {
+    L1Summary s = SummarizeL1Block(data_dir_ + "/L1/" + name, kLevelL1);
     ++stats.l1_blocks;
     stats.l1_buckets += s.bucket_count;
+  }
+  for (const auto& name : manifest_.RollupBlocks(2)) {
+    L1Summary s = SummarizeL1Block(data_dir_ + "/L2/" + name, kLevelL2);
+    ++stats.l2_blocks;
+    stats.l2_buckets += s.bucket_count;
+  }
+  for (const auto& name : manifest_.RollupBlocks(3)) {
+    L1Summary s = SummarizeL1Block(data_dir_ + "/L3/" + name, kLevelL3);
+    ++stats.l3_blocks;
+    stats.l3_buckets += s.bucket_count;
   }
   return stats;
 }

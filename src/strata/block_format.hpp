@@ -3,13 +3,19 @@
 #include <cstddef>
 #include <cstdint>
 
-// Block format shared by L0 and L1, per STRATA_DESIGN.md:
+// Block format shared by every level (L0 raw, L1/L2/L3 rollups):
 //   [Header][Series Index][Data Streams][Footer]
 namespace strata {
 
 inline constexpr uint32_t kBlockMagic = 0x4348524E;  // "CHRN"
 inline constexpr uint8_t kLevelL0 = 0;
 inline constexpr uint8_t kLevelL1 = 1;
+inline constexpr uint8_t kLevelL2 = 2;
+inline constexpr uint8_t kLevelL3 = 3;
+// Highest rollup level the engine currently compacts to. Bumping this
+// alone doesn't add a level -- see Manifest::kNumRollupLevels and the
+// per-level MakeDirs calls in Engine's constructor.
+inline constexpr uint8_t kMaxLevel = kLevelL3;
 inline constexpr uint8_t kFormatVersion = 1;
 
 // magic(4) + level(1) + format_version(1) + series_count(4) +
