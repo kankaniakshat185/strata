@@ -10,6 +10,7 @@
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
+#include <stdexcept>
 
 #include "strata/fsutil.hpp"
 #include "strata/manifest.hpp"
@@ -33,15 +34,22 @@ void TestRoundTrip() {
 
   strata::Manifest m;
   m.l0_blocks = {"00000001.blk", "00000002.blk"};
-  m.l1_blocks = {"00000001.blk"};
+  m.RollupBlocks(1) = {"00000001.blk"};
+  m.RollupBlocks(2) = {"00000001.blk", "00000002.blk"};
+  // L3 deliberately left empty -- round trip should preserve "no blocks
+  // at this level" as cleanly as "some blocks."
   strata::WriteManifestAtomic(path, m);
 
   strata::Manifest loaded = strata::LoadManifest(path);
   assert(loaded.l0_blocks.size() == 2);
   assert(Contains(loaded.l0_blocks, "00000001.blk"));
   assert(Contains(loaded.l0_blocks, "00000002.blk"));
-  assert(loaded.l1_blocks.size() == 1);
-  assert(Contains(loaded.l1_blocks, "00000001.blk"));
+  assert(loaded.RollupBlocks(1).size() == 1);
+  assert(Contains(loaded.RollupBlocks(1), "00000001.blk"));
+  assert(loaded.RollupBlocks(2).size() == 2);
+  assert(Contains(loaded.RollupBlocks(2), "00000001.blk"));
+  assert(Contains(loaded.RollupBlocks(2), "00000002.blk"));
+  assert(loaded.RollupBlocks(3).empty());
 
   ::unlink(path.c_str());
 }
@@ -49,7 +57,9 @@ void TestRoundTrip() {
 void TestMissingFileIsEmpty() {
   strata::Manifest m = strata::LoadManifest("/tmp/strata_test_manifest_nope_xyz");
   assert(m.l0_blocks.empty());
-  assert(m.l1_blocks.empty());
+  assert(m.RollupBlocks(1).empty());
+  assert(m.RollupBlocks(2).empty());
+  assert(m.RollupBlocks(3).empty());
 }
 
 void TestCrashBeforeRenameKeepsOldManifest() {
@@ -105,13 +115,38 @@ void TestBootstrapAndOrphanCleanup() {
   TouchFile(data_dir + "/L1/00000099.blk");  // orphan, not in manifest
 
   strata::Manifest m2 = strata::LoadOrBootstrapManifest(data_dir);
-  assert(m2.l1_blocks.empty());  // manifest still says no L1 blocks are live
+  assert(m2.RollupBlocks(1).empty());  // manifest still says no L1 blocks are live
 
   struct stat st;
   bool orphan_gone = ::stat((data_dir + "/L1/00000099.blk").c_str(), &st) != 0;
   assert(orphan_gone);
 
   std::system(("rm -rf " + data_dir).c_str());
+}
+
+void TestUnrecognizedLevelThrows() {
+  // A previous version of the parser silently dropped any level token it
+  // didn't recognize ("L9", garbage, etc.) -- quietly losing whatever
+  // that line described. It should error loudly instead.
+  const std::string path = "/tmp/strata_test_manifest_bad_level";
+  ::unlink(path.c_str());
+
+  int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  assert(fd >= 0);
+  std::string content = "L0 00000001.blk\nL9 00000002.blk\n";
+  ssize_t n = ::write(fd, content.data(), content.size());
+  assert(n == static_cast<ssize_t>(content.size()));
+  ::close(fd);
+
+  bool threw = false;
+  try {
+    strata::LoadManifest(path);
+  } catch (const std::runtime_error&) {
+    threw = true;
+  }
+  assert(threw);
+
+  ::unlink(path.c_str());
 }
 
 }  // namespace
@@ -121,6 +156,7 @@ int main() {
   TestMissingFileIsEmpty();
   TestCrashBeforeRenameKeepsOldManifest();
   TestBootstrapAndOrphanCleanup();
+  TestUnrecognizedLevelThrows();
   std::printf("test_manifest: all assertions passed\n");
   return 0;
 }

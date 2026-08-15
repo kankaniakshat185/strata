@@ -122,9 +122,9 @@ std::vector<RollupBucket> DecodeSeriesRollup(const uint8_t* data,
 }  // namespace
 
 void WriteL1Block(const std::string& path,
-                   const std::vector<L1SeriesRollup>& series) {
+                   const std::vector<L1SeriesRollup>& series, uint8_t level) {
   BlockHeader header;
-  header.level = kLevelL1;
+  header.level = level;
   header.series_count = static_cast<uint32_t>(series.size());
   header.created_at = NowUnixSeconds();
   bool first = true;
@@ -182,7 +182,8 @@ void WriteL1Block(const std::string& path,
 
 namespace {
 
-std::vector<uint8_t> ReadWholeFileChecked(const std::string& path) {
+std::vector<uint8_t> ReadWholeFileChecked(const std::string& path,
+                                           uint8_t expected_level) {
   int fd = ::open(path.c_str(), O_RDONLY);
   if (fd < 0) throw std::runtime_error("L1: open failed for " + path);
 
@@ -213,22 +214,25 @@ std::vector<uint8_t> ReadWholeFileChecked(const std::string& path) {
   if (header.magic != kBlockMagic) {
     throw std::runtime_error("L1: bad magic in " + path);
   }
-  if (header.level != kLevelL1) {
-    throw std::runtime_error("L1: not an L1 block: " + path);
+  if (header.level != expected_level) {
+    throw std::runtime_error(
+        "L1: expected level " + std::to_string(expected_level) +
+        " but block is level " + std::to_string(header.level) + ": " + path);
   }
   return buf;
 }
 
 }  // namespace
 
-L1Summary SummarizeL1Block(const std::string& path) {
-  std::vector<uint8_t> buf = ReadWholeFileChecked(path);
+L1Summary SummarizeL1Block(const std::string& path, uint8_t expected_level) {
+  std::vector<uint8_t> buf = ReadWholeFileChecked(path, expected_level);
   BlockHeader header = DecodeBlockHeader(buf.data());
 
   L1Summary summary;
   summary.series_count = header.series_count;
   summary.min_timestamp = header.min_timestamp;
   summary.max_timestamp = header.max_timestamp;
+  summary.created_at = header.created_at;
   for (uint32_t i = 0; i < header.series_count; ++i) {
     const uint8_t* p =
         buf.data() + kBlockHeaderSize + i * kSeriesIndexEntrySize;
@@ -239,8 +243,9 @@ L1Summary SummarizeL1Block(const std::string& path) {
   return summary;
 }
 
-std::vector<L1SeriesRollup> ReadL1Block(const std::string& path) {
-  std::vector<uint8_t> buf = ReadWholeFileChecked(path);
+std::vector<L1SeriesRollup> ReadL1Block(const std::string& path,
+                                         uint8_t expected_level) {
+  std::vector<uint8_t> buf = ReadWholeFileChecked(path, expected_level);
   BlockHeader header = DecodeBlockHeader(buf.data());
 
   size_t data_start =

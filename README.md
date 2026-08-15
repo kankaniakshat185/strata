@@ -49,14 +49,18 @@ disconnected pieces.
 ```
 Writers ──> WAL (fsync'd) ──> MemTable ──> flush ──> L0 (Gorilla-compressed, raw resolution)
                                                             │
-                                                  background compaction
+                                                       compaction
                                                             ▼
-                                            L1 (downsampled rollups: min/max/avg/count/p99)
+                                            L1 (rollups: min/max/avg/count/p99)
+                                                            │
+                                                  compaction (coarser)
+                                                            ▼
+                                                        L2 ──> L3 (same cascade, wider buckets)
 
               Inverted index: label filter ──> matching series, in O(1)-ish time
                                         regardless of how many series exist
 
-  Query router: recent range ──> L0 · older range ──> L1 · spanning range ──> both, stitched
+  Query router: recent range ──> L0 · older range ──> any rollup level · spanning range ──> stitched
 ```
 
 ## Highlights
@@ -95,7 +99,8 @@ of tradeoffs, not just headline numbers.
 make test                                  # build everything, run all unit tests
 ./build/strata_tool write ./data 100000    # write a burst of points
 ./build/strata_tool recover ./data         # replay + report what's there
-./build/strata_tool compact ./data         # downsample old data
+./build/strata_tool compact ./data         # downsample old data (L0 -> L1)
+./build/strata_tool compact-rollup ./data 1  # age further (L1 -> L2, or 2 for L2 -> L3)
 ./build/strata_tool bench ./data           # compression ratio
 ./build/strata_tool cardbench              # cardinality-scaling benchmark
 ./build/strata_tool query-bench ./data     # query-latency-by-range benchmark
@@ -157,14 +162,26 @@ design, not a bottleneck that was missed.
 Built to be defensible, not to look feature-complete. What's explicitly
 out of scope, and why:
 
-- **One compaction level (L0 → L1), not a full multi-level LSM tree.**
-  The mechanism generalizes cleanly; a second level wasn't worth the time
-  against a project that already proves the technique.
+- **Compaction now cascades L0 → L1 → L2 → L3**, aging raw points into
+  progressively coarser rollups (e.g. hourly → daily → monthly), each
+  hop reusing the same MANIFEST swap and crash-safety mechanism as the
+  first. count/min/max/avg all combine exactly across a merge; p99 does
+  not — see the next bullet.
 - **Rollup percentiles are a point estimate, not a full quantile
-  sketch.** Accurate enough as a trend signal for old data; a system that
-  needed precise historical percentiles would store a proper sketch
-  (t-digest, HDR histogram) per summary bucket instead — a real design
-  change, called out rather than glossed over.
+  sketch, and the error compounds with every merge.** Merging summaries
+  (not raw points) uses a count-weighted average of the source p99s,
+  which is simple and explainable but has a specific, measured failure
+  mode: a small bucket's own p99 is nearly always close to its own max,
+  so merging many small buckets drags the estimate toward the plain mean
+  rather than the true 99th percentile. A test built specifically to
+  demonstrate this (20 narrow buckets, 2 of them containing a real
+  spike) measured an **89% divergence** between the merged estimate and
+  the true value computed directly from the same raw points — not a
+  rounding error, a structural property of averaging percentiles. Fine
+  as a coarse trend signal for old, heavily-aged data; a system that
+  needed accurate historical percentiles would store a proper sketch
+  (t-digest, HDR histogram) per bucket instead — a real design change,
+  measured and called out rather than glossed over.
 - **Write throughput is capped by fsync-per-write, by choice.** Every
   write is durable the instant it's acknowledged. The standard next step
   for higher throughput — batching multiple writers' records into one

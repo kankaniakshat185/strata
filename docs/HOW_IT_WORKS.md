@@ -17,13 +17,17 @@ flowchart LR
     W[Write] --> WAL[("WAL<br/>fsync'd to disk")]
     WAL --> MT["MemTable<br/>(sorted in memory)"]
     MT -->|"threshold reached"| L0["L0 block<br/>Gorilla-compressed,<br/>full resolution"]
-    L0 -->|"background compaction<br/>(age-triggered)"| L1["L1 block<br/>downsampled rollups<br/>(min / max / avg / p99)"]
+    L0 -->|"compaction<br/>(age-triggered)"| L1["L1 block<br/>hourly rollups"]
+    L1 -->|"compaction<br/>(age-triggered)"| L2["L2 block<br/>daily rollups"]
+    L2 -->|"compaction<br/>(age-triggered)"| L3["L3 block<br/>monthly rollups"]
 
     IDX[["Inverted index<br/>label → series"]]
     Q{{"Query router"}}
     IDX -.resolves series.-> Q
     L0 -.recent range.-> Q
     L1 -.older range.-> Q
+    L2 -.older still.-> Q
+    L3 -.oldest.-> Q
 ```
 
 Four stages, each doing one job:
@@ -148,9 +152,9 @@ is intentional, not a missed opportunity.
 
 ## Compaction: turning points into statistics
 
-A background pass scans L0 blocks old enough to be eligible, and for
-each series, groups their points into fixed-width time buckets (e.g. one
-bucket per hour). Every bucket becomes one row in the output:
+A pass scans L0 blocks old enough to be eligible, and for each series,
+groups their points into fixed-width time buckets (e.g. one bucket per
+hour). Every bucket becomes one row in the output:
 
 ```
 count, min, max, avg, p99
@@ -163,27 +167,53 @@ important part isn't the ratio, it's that a query for "average CPU last
 month" doesn't need to read a month of raw points to answer — the answer
 is already sitting in the rollup.
 
-**The honest tradeoff:** a rollup's p99 is computed once, over its own
-bucket, and then thrown away — the raw points aren't kept. A query
-spanning several buckets has to approximate a combined p99 by averaging
-the buckets' individual p99s, and that approximation gets measurably
-worse as buckets get smaller (a table in the README shows this ranging
-from 0.1% to 27.8% divergence from the true value, depending on bucket
-size). This is a known, measured limitation, not a hidden one — a
-production system that needed precise historical percentiles would store
-a proper streaming quantile sketch per bucket instead of a single number.
+**The cascade doesn't stop at one level.** The same mechanism runs again
+on L1's output: L1's hourly buckets age into L2's daily buckets, and L2's
+daily buckets age into L3's monthly ones. Each hop is the same
+operation — merge several summaries into one coarser summary — just
+applied one level up. Directories `L0/` through `L3/` and a MANIFEST
+entry per level track which blocks are live at each resolution; a query
+spanning a wide enough range can end up stitching together data from
+several levels at once, each kept at its own resolution rather than
+blended into one.
 
-**Making the swap crash-safe.** Compaction writes a brand new L1 block
-and then needs to retire the old L0 blocks it summarized — two separate
-file operations that can't happen atomically on their own. A crash
-between them could leave the system trusting neither. The fix is a small
-manifest file listing which blocks are currently "live": write the new
-L1 block, `fsync` it, write the new manifest to a temp file, `fsync`
-that, then rename it over the old manifest in one atomic filesystem
-operation. Only after that succeeds are the old L0 blocks deleted. A
-crash at any point before the rename leaves the *old* manifest in place —
-still pointing at the still-valid old data — and compaction simply
-retries on the next run.
+**The honest tradeoff, and where it actually shows up.** A rollup's p99
+is computed once, over its own bucket, and then the raw points are
+thrown away — there's no way to recompute an exact combined p99 later.
+Two different places this matters:
+
+- **At query time**, a request spanning several buckets has to
+  approximate a combined p99 by averaging the buckets' individual p99s.
+- **At compaction time**, merging L1 buckets into an L2 bucket (or L2
+  into L3) uses that same count-weighted average of the source p99s —
+  it's the only information left to work with once the raw points are
+  gone.
+
+Both get measurably worse as the buckets being combined get smaller,
+because a small bucket's own p99 is nearly always close to its own
+max — averaging many small buckets' near-maxima drags the result toward
+the plain mean, not the true 99th percentile. This isn't a rounding
+error; it's a structural property of averaging percentiles at all. A
+test built specifically to demonstrate the compaction-time version of
+this (20 narrow L1 buckets, 2 of them containing a real spike, merged
+into one L2 bucket) measured an **89% divergence** between the merged
+estimate and the true p99 computed directly from the same underlying
+points. Known, measured, not hidden — a production system that needed
+accurate historical percentiles would store a proper streaming quantile
+sketch per bucket instead of a single number.
+
+**Making the swap crash-safe.** Compaction writes a brand new, coarser
+block and then needs to retire the finer blocks it summarized — two
+separate file operations that can't happen atomically on their own. A
+crash between them could leave the system trusting neither. The fix is a
+small manifest file listing which blocks are currently "live" at every
+level: write the new block, `fsync` it, write the new manifest to a temp
+file, `fsync` that, then rename it over the old manifest in one atomic
+filesystem operation. Only after that succeeds are the superseded blocks
+deleted. A crash at any point before the rename leaves the *old*
+manifest in place — still pointing at the still-valid old data — and
+compaction simply retries on the next run, at whichever level it was
+working on.
 
 ## Finding series fast: the inverted index
 
@@ -220,8 +250,9 @@ Given a label filter and a time range, the router:
    decide, without opening the block, whether it could possibly contain
    relevant data.
 3. Reads only the blocks that overlap the requested range — recent
-   blocks from L0, older ones from L1, or both if the range spans the
-   boundary.
+   blocks from L0, older ones from whichever rollup level (L1, L2, or
+   L3) covers that time, or several levels at once if the range spans
+   more than one, each kept at its own resolution in the result.
 
 A block whose range doesn't overlap the query is never opened, never
 decoded — just skipped based on two numbers in its header. That's the

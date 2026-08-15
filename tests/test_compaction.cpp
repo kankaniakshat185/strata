@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "strata/block_format.hpp"
 #include "strata/compactor.hpp"
 #include "strata/fsutil.hpp"
 #include "strata/l0_writer.hpp"
@@ -66,7 +67,7 @@ void TestHandVerifiedRollup() {
   assert(result.buckets_written == 2 + 1);  // series 1: 2 buckets, series 2: 1
 
   std::vector<strata::L1SeriesRollup> l1 =
-      strata::ReadL1Block(result.l1_block_path);
+      strata::ReadL1Block(result.l1_block_path, strata::kLevelL1);
   assert(l1.size() == 2);
 
   const auto* s1 = FindSeries(l1, 1);
@@ -115,7 +116,7 @@ void TestHandVerifiedRollup() {
 
   strata::Manifest m = strata::LoadManifest(data_dir + "/MANIFEST");
   assert(m.l0_blocks.empty());
-  assert(m.l1_blocks.size() == 1);
+  assert(m.RollupBlocks(1).size() == 1);
 
   std::printf(
       "test_compaction: %llu L0 bytes -> %llu L1 bytes for %llu points "

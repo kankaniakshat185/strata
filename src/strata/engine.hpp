@@ -21,6 +21,10 @@ struct EngineStats {
   uint64_t l0_points = 0;
   uint64_t l1_blocks = 0;
   uint64_t l1_buckets = 0;
+  uint64_t l2_blocks = 0;
+  uint64_t l2_buckets = 0;
+  uint64_t l3_blocks = 0;
+  uint64_t l3_buckets = 0;
   uint64_t points_replayed_from_wal = 0;
 };
 
