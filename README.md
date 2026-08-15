@@ -16,7 +16,7 @@ data a request actually needs.
 
 No frameworks, no third-party libraries — just the C++ standard library
 and POSIX file I/O. ~2,400 lines of engine code, ~900 lines of tests,
-9 test binaries, all passing, plus two crash-recovery test harnesses
+10 test binaries, all passing, plus two crash-recovery test harnesses
 (one of which literally sends the process `SIGKILL` mid-write and
 confirms it comes back with no data loss).
 
@@ -77,12 +77,18 @@ Writers ──> WAL (fsync'd) ──> MemTable ──> flush ──> L0 (Gorilla
   divergence table showing exactly how much a rolled-up p99 drifts from
   the true value at different summarization granularities
 - **Crash safety proven, not assumed** — deterministic fault injection
-  (the same technique used in RocksDB and TiKV) kills the process at 5
-  exact code points mid-write and mid-compaction, and every scenario
-  recovers with zero data loss beyond what was already in flight
+  (the same technique used in RocksDB and TiKV) kills the process at 7
+  exact code points across writes, L0->L1 compaction, and L1->L2 rollup
+  compaction, and every scenario recovers with zero data loss beyond
+  what was already in flight
 - **Query planner that skips work it doesn't need** — a 10-minute query
   against months of history touches only the 1-2 blocks that actually
   overlap it, verified with real scanned/skipped block counts
+- **A second index built specifically to find its own limits** — a B+
+  tree benchmarked head-to-head against the hash map on identical data;
+  loses at plain lookups exactly as expected, but wins prefix scans by
+  3.4x at scale via its sorted leaf chain, the one thing a hash map
+  structurally can't do
 
 ## Skills demonstrated
 
@@ -103,6 +109,7 @@ make test                                  # build everything, run all unit test
 ./build/strata_tool compact-rollup ./data 1  # age further (L1 -> L2, or 2 for L2 -> L3)
 ./build/strata_tool bench ./data           # compression ratio
 ./build/strata_tool cardbench              # cardinality-scaling benchmark
+./build/strata_tool indexbench             # hash map vs. B+ tree comparison
 ./build/strata_tool query-bench ./data     # query-latency-by-range benchmark
 ./build/strata_tool loadtest ./data        # concurrent-writer throughput
 ```
@@ -138,6 +145,25 @@ exact numbers will vary by hardware.*
 
 Index size grows linearly, as expected — latency barely moves.
 
+**Hash map vs. B+ tree** — a second index, built specifically to compare
+against the first, over the identical dataset at 1,000,000 entries:
+
+| | Hash map | B+ tree (order 128) |
+|---|---|---|
+| Single lookup (p50) | **500 ns** | 3,833 ns |
+| 3-filter intersect (p50) | **4,542 ns** | 9,417 ns |
+| Prefix scan, `host=h1*` (111K matches) | 77.2 ms | **22.7 ms** |
+
+The hash map wins plain lookups, as expected — that's what it's for. The
+tree wins the one operation the hash map has no shortcut for at all: a
+prefix scan, via its sorted leaf chain instead of checking all million
+keys. That gap widens with scale (2.1x faster at 1K entries, 3.4x at 1M).
+Node width was swept (8/32/128) rather than picked once — wider won on
+every axis measured, including using ~22% less memory, and the
+narrowest tree had a p99 lookup latency 90x worse than the hash map's at
+1M entries despite a much smaller gap in the median. Full writeup:
+[docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md#a-second-index-built-specifically-to-compare-against-the-first).
+
 **Query planning** — 100 days of data, most of it aged into summaries:
 
 | Range requested | Blocks touched | Blocks correctly skipped |
@@ -146,9 +172,11 @@ Index size grows linearly, as expected — latency barely moves.
 | 3 days (spans both resolutions) | 3 | 97 |
 | 90 days | 90 | 10 |
 
-**Crash recovery** — process killed at 6 different exact points during
-writes and compaction: every scenario recovers with no corruption and no
-data loss beyond what hadn't been durably written yet.
+**Crash recovery** — process killed at 7 different exact points during
+writes and compaction (deterministic fault injection), plus one timed
+external `SIGKILL` mid-write for good measure: every scenario recovers
+with no corruption and no data loss beyond what hadn't been durably
+written yet.
 
 **Concurrency** — throughput holds flat (~46K–49K points/sec) from 1 to
 32 concurrent writer threads, because every write is durably fsync'd to

@@ -41,6 +41,14 @@ class InvertedIndex {
   std::vector<uint64_t> IntersectQuery(
       const std::vector<std::string>& label_kvs) const;
 
+  // Every series carrying a label starting with `prefix`. A hash map has
+  // no notion of key order, so unlike BPlusTree::PrefixQuery (see
+  // bplus_tree.hpp) there's no shortcut here -- this checks every single
+  // key. Exists specifically so the B+ tree comparison benchmark has a
+  // fair baseline for this operation rather than "one structure can't do
+  // this at all."
+  std::vector<uint64_t> PrefixQuery(const std::string& prefix) const;
+
   size_t distinct_label_pairs() const { return postings_.size(); }
   uint64_t total_postings_entries() const;
 
