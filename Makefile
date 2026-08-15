@@ -10,7 +10,7 @@ CORE_LIB  := $(BUILD_DIR)/libstrata_core.a
 
 .PHONY: all test clean phase1-check
 
-all: $(BUILD_DIR)/test_trivial $(BUILD_DIR)/test_wal $(BUILD_DIR)/test_gorilla $(BUILD_DIR)/test_l0 $(BUILD_DIR)/test_manifest $(BUILD_DIR)/test_compaction $(BUILD_DIR)/test_rollup_compaction $(BUILD_DIR)/test_inverted_index $(BUILD_DIR)/test_query $(BUILD_DIR)/strata_tool
+all: $(BUILD_DIR)/test_trivial $(BUILD_DIR)/test_wal $(BUILD_DIR)/test_gorilla $(BUILD_DIR)/test_l0 $(BUILD_DIR)/test_manifest $(BUILD_DIR)/test_compaction $(BUILD_DIR)/test_rollup_compaction $(BUILD_DIR)/test_inverted_index $(BUILD_DIR)/test_bplus_tree $(BUILD_DIR)/test_query $(BUILD_DIR)/strata_tool
 
 $(OBJ_DIR):
 	mkdir -p $(OBJ_DIR)
@@ -45,6 +45,9 @@ $(BUILD_DIR)/test_rollup_compaction: tests/test_rollup_compaction.cpp $(CORE_LIB
 $(BUILD_DIR)/test_inverted_index: tests/test_inverted_index.cpp $(CORE_LIB)
 	$(CXX) $(CXXFLAGS) $< $(CORE_LIB) -o $@
 
+$(BUILD_DIR)/test_bplus_tree: tests/test_bplus_tree.cpp $(CORE_LIB)
+	$(CXX) $(CXXFLAGS) $< $(CORE_LIB) -o $@
+
 $(BUILD_DIR)/test_query: tests/test_query.cpp $(CORE_LIB)
 	$(CXX) $(CXXFLAGS) $< $(CORE_LIB) -o $@
 
@@ -60,6 +63,7 @@ test: all
 	$(BUILD_DIR)/test_compaction
 	$(BUILD_DIR)/test_rollup_compaction
 	$(BUILD_DIR)/test_inverted_index
+	$(BUILD_DIR)/test_bplus_tree
 	$(BUILD_DIR)/test_query
 
 phase1-check: $(BUILD_DIR)/strata_tool

@@ -17,6 +17,7 @@
 #include <thread>
 #include <vector>
 
+#include "strata/bplus_tree.hpp"
 #include "strata/compactor.hpp"
 #include "strata/engine.hpp"
 #include "strata/fault_injection.hpp"
@@ -258,6 +259,115 @@ void RunCardinalityBench() {
   }
 }
 
+// Head-to-head comparison: InvertedIndex (hash map) vs. BPlusTree, over
+// the identical synthetic dataset RunCardinalityBench already uses (same
+// seeded RNG, same host/metric/region shape, same checkpoints), so the
+// two are compared on exactly the same data, not just similar data.
+//
+// Point lookup and multi-filter intersect are included for completeness,
+// but the honest expectation going in is that the hash map wins both --
+// that's not a bug in the tree, it's just not what a B+ tree is for.
+// Prefix scan is the one operation with a genuine structural difference:
+// the tree's sorted leaf chain answers it in O(log n + matches); the
+// hash map (see InvertedIndex::PrefixQuery) has no ordering to exploit
+// and has to check every key. B+ tree order (max keys per node) is swept
+// across a few values rather than picked once and asserted "reasonable."
+void RunIndexBench() {
+  strata::InvertedIndex idx;
+  const std::vector<int> kOrders = {8, 32, 128};
+  // unique_ptr, not BPlusTree directly: the class is intentionally
+  // non-copyable (see bplus_tree.hpp), and declaring its destructor out
+  // of line (needed since Node is only complete in the .cpp) also
+  // suppresses the implicit move constructor -- so it can't live
+  // directly in a std::vector that might need to reallocate.
+  std::vector<std::unique_ptr<strata::BPlusTree>> trees;
+  for (int order : kOrders) trees.push_back(std::make_unique<strata::BPlusTree>(order));
+
+  const std::vector<int64_t> checkpoints = {1000, 10000, 100000, 1000000};
+  const char* kMetrics[] = {"cpu_usage", "mem_usage", "disk_io", "net_io"};
+  const char* kRegions[] = {"us-east", "us-west", "eu-west"};
+  const std::string kPrefix = "host=h1";  // matches h1, h10-19, h100-199, ...
+
+  std::mt19937_64 rng(42);
+  size_t next_checkpoint = 0;
+
+  // Measures Find/IntersectQuery/PrefixQuery latency for one structure
+  // (either) and prints one result line. Templated on the structure type
+  // since InvertedIndex and BPlusTree share the same method shapes but
+  // no common base class -- see ARCHITECTURE.md's notes on why this
+  // benchmark doesn't introduce one just to avoid this template.
+  auto MeasureAndPrint = [&](const char* label, const auto& structure,
+                              int64_t n, size_t samples) {
+    std::uniform_int_distribution<int64_t> dist(0, n - 1);
+    std::mt19937_64 sample_rng(42);  // same sample sequence for every structure/order
+    std::vector<double> lookup_ns, intersect_ns;
+    lookup_ns.reserve(samples);
+    intersect_ns.reserve(samples);
+
+    for (size_t s = 0; s < samples; ++s) {
+      int64_t k = dist(sample_rng);
+      std::string host_kv = "host=h" + std::to_string(k);
+      std::string metric_kv = std::string("metric=") + kMetrics[k % 4];
+      std::string region_kv = std::string("region=") + kRegions[k % 3];
+
+      auto t0 = std::chrono::steady_clock::now();
+      const auto* found = structure.Find(host_kv);
+      auto t1 = std::chrono::steady_clock::now();
+      (void)found;
+      lookup_ns.push_back(
+          std::chrono::duration<double, std::nano>(t1 - t0).count());
+
+      auto t2 = std::chrono::steady_clock::now();
+      auto matched = structure.IntersectQuery({host_kv, metric_kv, region_kv});
+      auto t3 = std::chrono::steady_clock::now();
+      (void)matched;
+      intersect_ns.push_back(
+          std::chrono::duration<double, std::nano>(t3 - t2).count());
+    }
+
+    auto tp0 = std::chrono::steady_clock::now();
+    auto prefix_matches = structure.PrefixQuery(kPrefix);
+    auto tp1 = std::chrono::steady_clock::now();
+    double prefix_us =
+        std::chrono::duration<double, std::micro>(tp1 - tp0).count();
+
+    std::printf(
+        "indexbench: %-12s N=%-8lld distinct=%-9zu est_bytes=%-10llu "
+        "lookup_p50=%6.0fns lookup_p99=%6.0fns intersect_p50=%6.0fns "
+        "intersect_p99=%6.0fns prefix_scan=%8.1fus (%zu matches)\n",
+        label, static_cast<long long>(n), structure.distinct_label_pairs(),
+        static_cast<unsigned long long>(structure.EstimatedBytes()),
+        Percentile(lookup_ns, 0.50), Percentile(lookup_ns, 0.99),
+        Percentile(intersect_ns, 0.50), Percentile(intersect_ns, 0.99),
+        prefix_us, prefix_matches.size());
+  };
+
+  for (int64_t i = 0; i < checkpoints.back(); ++i) {
+    std::string canonical = strata::CanonicalLabelString({
+        {"host", "h" + std::to_string(i)},
+        {"metric", kMetrics[i % 4]},
+        {"region", kRegions[i % 3]},
+    });
+    uint64_t series_id = uint64_t(i + 1);
+    idx.AddSeries(series_id, canonical);
+    for (auto& tree : trees) tree->AddSeries(series_id, canonical);
+
+    if (next_checkpoint < checkpoints.size() &&
+        i + 1 == checkpoints[next_checkpoint]) {
+      int64_t n = checkpoints[next_checkpoint];
+      size_t samples = size_t(std::min<int64_t>(n, 2000));
+
+      MeasureAndPrint("hashmap", idx, n, samples);
+      for (size_t t = 0; t < trees.size(); ++t) {
+        std::string label = "btree(o=" + std::to_string(kOrders[t]) + ")";
+        MeasureAndPrint(label.c_str(), *trees[t], n, samples);
+      }
+      std::fflush(stdout);
+      ++next_checkpoint;
+    }
+  }
+}
+
 // Phase 5 checkpoint: query latency at 10min/1day/90day ranges, "confirm
 // no unnecessary scans." Builds ~100 days of data, one L0 flush per day,
 // immediately compacted into its own L1 block except for the last 2 days
@@ -352,10 +462,10 @@ void RunQueryBench(const std::string& data_dir) {
 // Phase 6 checkpoint: deterministic crash-recovery scenarios, driven by
 // tests/phase6_crash_recovery.sh which sets STRATA_CRASH_AT before
 // launching this. Each scenario does the minimum setup needed to reach
-// the named MaybeCrash() call inside Engine::Flush() or RunCompaction();
-// if the env var doesn't match (e.g. run directly without the harness),
-// it just completes normally -- useful for confirming the setup itself
-// is correct before wiring in the actual kill.
+// the named MaybeCrash() call inside Engine::Flush(), RunCompaction(), or
+// RunRollupCompaction(); if the env var doesn't match (e.g. run directly
+// without the harness), it just completes normally -- useful for
+// confirming the setup itself is correct before wiring in the actual kill.
 void RunCrashTest(const std::string& point, const std::string& data_dir) {
   std::system(("rm -rf " + data_dir).c_str());
   const std::string labels = "host=h0,metric=cpu_usage,region=us-east";
@@ -385,6 +495,19 @@ void RunCrashTest(const std::string& point, const std::string& data_dir) {
     }  // flush already happened via threshold; engine closed cleanly first
     strata::RunCompaction(data_dir, /*bucket_width_ms=*/60000,
                           /*min_age_seconds=*/0);
+  } else if (point == "post_rollup_write_pre_manifest_rename_L2" ||
+             point == "post_rollup_manifest_rename_pre_source_delete_L2") {
+    {
+      strata::Engine engine(data_dir, /*flush_threshold=*/50);
+      for (int i = 0; i < 50; ++i) {
+        engine.Write(labels, kBaseTs + i, double(i));
+      }
+    }  // flush already happened via threshold; engine closed cleanly first
+    strata::RunCompaction(data_dir, /*bucket_width_ms=*/60000,
+                          /*min_age_seconds=*/0);  // produces the L1 block
+    strata::RunRollupCompaction(data_dir, /*source_level=*/1,
+                                /*bucket_width_ms=*/3600000,
+                                /*min_age_seconds=*/0);  // L1 -> L2
   } else {
     std::fprintf(stderr, "unknown crash point: %s\n", point.c_str());
     std::exit(2);
@@ -449,6 +572,10 @@ int main(int argc, char** argv) {
     RunCardinalityBench();
     return 0;
   }
+  if (argc >= 2 && std::string(argv[1]) == "indexbench") {
+    RunIndexBench();
+    return 0;
+  }
   if (argc >= 2 && std::string(argv[1]) == "crashtest") {
     if (argc < 4) {
       std::fprintf(stderr, "crashtest requires <point> <data_dir>\n");
@@ -468,11 +595,12 @@ int main(int argc, char** argv) {
         "       %s compact-rollup <data_dir> <source_level 1|2> "
         "[bucket_width_ms] [min_age_seconds]\n"
         "       %s cardbench\n"
+        "       %s indexbench\n"
         "       %s query-bench <data_dir>\n"
         "       %s crashtest <point> <data_dir>\n"
         "       %s loadtest <data_dir>\n",
         argv[0], argv[0], argv[0], argv[0], argv[0], argv[0], argv[0],
-        argv[0], argv[0]);
+        argv[0], argv[0], argv[0]);
     return 2;
   }
 

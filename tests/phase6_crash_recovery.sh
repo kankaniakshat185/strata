@@ -119,6 +119,34 @@ else
   FAIL=1
 fi
 
+# --- 6. mid rollup-compaction (L1->L2), after the new L2 block is
+#     written but before MANIFEST is swapped: same shape as scenario 4,
+#     one level up. The source L1 block is still manifest-live and
+#     untouched; the orphaned L2 file gets cleaned up. ---
+run_point post_rollup_write_pre_manifest_rename_L2
+if [ "$(field l1_blocks "$RECOVER_OUT")" = "1" ] && \
+   [ "$(field l1_buckets "$RECOVER_OUT")" -gt "0" ] && \
+   [ "$(field l2_blocks "$RECOVER_OUT")" = "0" ]; then
+  echo "  PASS: orphaned L2 block cleaned up, original L1 data untouched"
+else
+  echo "  FAIL: expected original L1 block intact, orphan L2 cleaned up"
+  FAIL=1
+fi
+
+# --- 7. mid rollup-compaction (L1->L2), after MANIFEST is swapped but
+#     before the old L1 block is deleted: same shape as scenario 5, one
+#     level up. MANIFEST already correctly points at the new L2 block;
+#     cleanup must finish deleting the now-orphaned L1 file. ---
+run_point post_rollup_manifest_rename_pre_source_delete_L2
+if [ "$(field l1_blocks "$RECOVER_OUT")" = "0" ] && \
+   [ "$(field l2_blocks "$RECOVER_OUT")" = "1" ] && \
+   [ "$(field l2_buckets "$RECOVER_OUT")" -gt "0" ]; then
+  echo "  PASS: superseded L1 block cleaned up, data present via the new L2 block"
+else
+  echo "  FAIL: expected L1 cleaned up (0 blocks), L2 already live with buckets"
+  FAIL=1
+fi
+
 echo ""
 rm -rf /tmp/strata_phase6_* 2>/dev/null || true
 if [ "$FAIL" -eq 0 ]; then

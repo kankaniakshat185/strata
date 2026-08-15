@@ -58,6 +58,22 @@ std::vector<uint64_t> InvertedIndex::IntersectQuery(
   return result;
 }
 
+std::vector<uint64_t> InvertedIndex::PrefixQuery(
+    const std::string& prefix) const {
+  std::vector<uint64_t> result;
+  // No shortcut available: a hash map gives no ordering to exploit, so
+  // every key has to be checked. This is the cost BPlusTree::PrefixQuery
+  // (bplus_tree.cpp) avoids via its sorted leaf chain -- that's the
+  // actual comparison this method exists to make possible.
+  for (const auto& [key, list] : postings_) {
+    if (key.size() >= prefix.size() &&
+        key.compare(0, prefix.size(), prefix) == 0) {
+      result.insert(result.end(), list.begin(), list.end());
+    }
+  }
+  return result;
+}
+
 uint64_t InvertedIndex::total_postings_entries() const {
   uint64_t total = 0;
   for (const auto& [key, list] : postings_) total += list.size();

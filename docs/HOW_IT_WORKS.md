@@ -240,6 +240,68 @@ even at a million unique series (see the chart in the README) — without
 it, a filter that included a common label would degrade linearly with
 total series count no matter how small the *other* filter was.
 
+## A second index, built specifically to compare against the first
+
+A hash map has no idea what order its keys are in — that's exactly why
+looking one up is so fast, and exactly why it can't answer "give me
+every series where the label starts with `host=h1`" without checking
+every single key. A **B+ tree** keeps every key sorted instead, organized
+as a tree of nodes with the bottom layer — the leaves — chained together
+in order. That sorted chain is the one thing this structure can do that
+the hash map structurally cannot: walk a *range* of keys without
+touching anything outside it.
+
+```
+                    [ host=h5 | host=h9 ]
+                   /          |          \
+       [host=h1..h4]   [host=h5..h8]   [host=h9..]
+        (leaf)  ──────→  (leaf) ──────→  (leaf)
+```
+
+This isn't a replacement for the hash map — it's a deliberate second
+implementation, built to answer the same question two structurally
+different ways and see what each is actually good at, rather than
+assuming. The honest expectation going in: a plain lookup should favor
+the hash map, easily. It does. Real numbers, same synthetic dataset the
+cardinality benchmark uses, at 1,000,000 unique label combinations:
+
+| | Hash map | B+ tree (order 128) |
+|---|---|---|
+| Single lookup (p50) | **500 ns** | 3,833 ns |
+| 3-filter intersect (p50) | **4,542 ns** | 9,417 ns |
+| Prefix scan (`host=h1*`, 111K matches) | 77.2 ms | **22.7 ms** |
+
+The prefix scan is the real comparison — the operation the hash map has
+no shortcut for at all (its version just checks all one million keys and
+keeps the ones that match; see `InvertedIndex::PrefixQuery`). The tree
+wins there, and the gap *widens* with scale: about 2.1x faster at 1,000
+entries, 3.4x faster at 1,000,000. That's the actual point of building a
+second structure — not to win at everything, but to find the one place
+it structurally can.
+
+**Node width is a real design knob, so it got measured instead of
+guessed.** How many keys fit in one tree node before it splits changes
+the tree's shape — wider nodes mean a shallower tree, fewer pointer
+hops to reach a leaf. Rather than pick one number, the benchmark sweeps
+a few (8, 32, 128) and lets the numbers say which is better. They're
+unambiguous: wider wins, on every axis measured, not just the obvious
+one. At 1,000,000 entries, order 128 versus order 8 is faster at lookup,
+faster at intersect, faster at the prefix scan **and** uses about 22%
+less memory (112 MB vs 144 MB) — fewer, larger nodes means less
+per-node bookkeeping overhead than more, smaller ones. The narrowest
+tree also has a much worse *tail*: p99 lookup latency at order 8 is
+90 µs at a million entries, against under 1 µs for the hash map at the
+same size — a gap the median numbers alone don't show.
+
+**This lives only in the benchmark, not the real database.** Wiring a
+second, live index into the actual write/query path would mean adding an
+abstraction neither `SeriesCatalog` nor `Engine` currently has — real,
+separate scope, not needed just to answer "which structure is faster at
+what." The existing cardinality benchmark already tests the hash map the
+same way, standalone, for the same reason: isolating a data structure's
+own performance from disk and fsync latency doesn't require it to be
+live in the real engine.
+
 ## Routing a query to the right resolution
 
 Given a label filter and a time range, the router:
