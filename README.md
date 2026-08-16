@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/kankaniakshat185/strata/actions/workflows/ci.yml/badge.svg)](https://github.com/kankaniakshat185/strata/actions/workflows/ci.yml)
 
+Built as a collaborative 2-member team by [Akshat Kankani](https://github.com/kankaniakshat185) and [Vaishnavi Rai](https://github.com/VaishnaviRai287).  
+
 **A tiered-resolution time-series database, built from scratch in C++.**
 
 Strata ingests high-frequency metrics (server CPU, IoT sensors, request
