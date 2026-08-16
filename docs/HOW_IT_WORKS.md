@@ -338,7 +338,8 @@ the whole history.
   (smallest-list-first intersection) are built around doing the cheapest
   possible check before doing the expensive thing.
 - **State tradeoffs, don't hide them.** Every shortcut in this project —
-  a coarse lock instead of fine-grained concurrency, one compaction level
-  instead of a full LSM tree, a point-estimate percentile instead of a
-  sketch — was a deliberate scope decision, and each one is measured and
-  reported rather than left for someone else to discover.
+  a coarse lock instead of fine-grained concurrency, a point-estimate
+  percentile instead of a full quantile sketch, a fixed four-level
+  cascade instead of an open-ended LSM tree — was a deliberate scope
+  decision, and each one is measured and reported rather than left for
+  someone else to discover.
