@@ -1,6 +1,7 @@
 # Strata
 
 [![CI](https://github.com/kankaniakshat185/strata/actions/workflows/ci.yml/badge.svg)](https://github.com/kankaniakshat185/strata/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Built as a collaborative 2-member team by [Akshat Kankani](https://github.com/kankaniakshat185) and [Vaishnavi Rai](https://github.com/VaishnaviRai287).  
 
@@ -17,7 +18,7 @@ high-cardinality label queries, and a query planner that reads only the
 data a request actually needs.
 
 No frameworks, no third-party libraries — just the C++ standard library
-and POSIX file I/O. ~2,400 lines of engine code, ~900 lines of tests,
+and POSIX file I/O. ~3,100 lines of engine code, ~1,300 lines of tests,
 10 test binaries, all passing, plus two crash-recovery test harnesses
 (one of which literally sends the process `SIGKILL` mid-write and
 confirms it comes back with no data loss).
@@ -48,21 +49,22 @@ disconnected pieces.
 
 ## Architecture
 
-```
-Writers ──> WAL (fsync'd) ──> MemTable ──> flush ──> L0 (Gorilla-compressed, raw resolution)
-                                                            │
-                                                       compaction
-                                                            ▼
-                                            L1 (rollups: min/max/avg/count/p99)
-                                                            │
-                                                  compaction (coarser)
-                                                            ▼
-                                                        L2 ──> L3 (same cascade, wider buckets)
+```mermaid
+flowchart LR
+    W[Writers] --> WAL[("WAL<br/>fsync'd")]
+    WAL --> MT["MemTable<br/>(sorted in memory)"]
+    MT -->|flush| L0["L0 block<br/>Gorilla-compressed,<br/>raw resolution"]
+    L0 -->|compaction| L1["L1<br/>rollups: min/max/avg/count/p99"]
+    L1 -->|compaction, coarser| L2["L2<br/>rollups"]
+    L2 -->|compaction, coarser| L3["L3<br/>rollups"]
 
-              Inverted index: label filter ──> matching series, in O(1)-ish time
-                                        regardless of how many series exist
-
-  Query router: recent range ──> L0 · older range ──> any rollup level · spanning range ──> stitched
+    IDX[["Inverted index<br/>label filter → matching series<br/>O(1)-ish, any scale"]]
+    Q{{"Query router"}}
+    IDX -.resolves series.-> Q
+    L0 -.recent range.-> Q
+    L1 -.older range.-> Q
+    L2 -.older still.-> Q
+    L3 -.spanning → stitched.-> Q
 ```
 
 ## Highlights
@@ -220,4 +222,4 @@ out of scope, and why:
 
 ## License
 
-Personal project, built for learning and portfolio purposes.
+MIT — see [LICENSE](LICENSE) for details.
