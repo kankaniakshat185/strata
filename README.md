@@ -64,6 +64,37 @@ flowchart LR
     L3 -.spanning → stitched.-> Q
 ```
 
+## Engineering Decisions
+
+Built to be defensible, not to look feature-complete. What's explicitly
+out of scope, and why:
+
+- **Compaction now cascades L0 → L1 → L2 → L3**, aging raw points into
+  progressively coarser rollups (e.g. hourly → daily → monthly), each
+  hop reusing the same MANIFEST swap and crash-safety mechanism as the
+  first. count/min/max/avg all combine exactly across a merge; p99 does
+  not — see the next bullet.
+- **Rollup percentiles are a point estimate, not a full quantile
+  sketch, and the error compounds with every merge.** Merging summaries
+  (not raw points) uses a count-weighted average of the source p99s,
+  which is simple and explainable but has a specific, measured failure
+  mode: a small bucket's own p99 is nearly always close to its own max,
+  so merging many small buckets drags the estimate toward the plain mean
+  rather than the true 99th percentile. A test built specifically to
+  demonstrate this (20 narrow buckets, 2 of them containing a real
+  spike) measured an **89% divergence** between the merged estimate and
+  the true value computed directly from the same raw points — not a
+  rounding error, a structural property of averaging percentiles. Fine
+  as a coarse trend signal for old, heavily-aged data; a system that
+  needed accurate historical percentiles would store a proper sketch
+  (t-digest, HDR histogram) per bucket instead — a real design change,
+  measured and called out rather than glossed over.
+- **Write throughput is capped by fsync-per-write, by choice.** Every
+  write is durable the instant it's acknowledged. The standard next step
+  for higher throughput — batching multiple writers' records into one
+  fsync ("group commit") — is a well-scoped future improvement, not
+  implemented here.
+
 ## Tech Stack
 
 | Layer | Choice |
@@ -266,36 +297,6 @@ The deeper writeups live in two places:
 - **[docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md)** — the technical reference: the pipeline stage by stage, the compression codec's math with worked bit-level examples, the crash-safety design, and the B+ tree comparison in full.
 - **[blog.md](blog.md)** — a long-form narrative writeup: the actual build order, numbers self-measured rather than assumed, and an honest accounting of what's good, bad, and still unresolved.
 
-## Engineering Decisions
-
-Built to be defensible, not to look feature-complete. What's explicitly
-out of scope, and why:
-
-- **Compaction now cascades L0 → L1 → L2 → L3**, aging raw points into
-  progressively coarser rollups (e.g. hourly → daily → monthly), each
-  hop reusing the same MANIFEST swap and crash-safety mechanism as the
-  first. count/min/max/avg all combine exactly across a merge; p99 does
-  not — see the next bullet.
-- **Rollup percentiles are a point estimate, not a full quantile
-  sketch, and the error compounds with every merge.** Merging summaries
-  (not raw points) uses a count-weighted average of the source p99s,
-  which is simple and explainable but has a specific, measured failure
-  mode: a small bucket's own p99 is nearly always close to its own max,
-  so merging many small buckets drags the estimate toward the plain mean
-  rather than the true 99th percentile. A test built specifically to
-  demonstrate this (20 narrow buckets, 2 of them containing a real
-  spike) measured an **89% divergence** between the merged estimate and
-  the true value computed directly from the same raw points — not a
-  rounding error, a structural property of averaging percentiles. Fine
-  as a coarse trend signal for old, heavily-aged data; a system that
-  needed accurate historical percentiles would store a proper sketch
-  (t-digest, HDR histogram) per bucket instead — a real design change,
-  measured and called out rather than glossed over.
-- **Write throughput is capped by fsync-per-write, by choice.** Every
-  write is durable the instant it's acknowledged. The standard next step
-  for higher throughput — batching multiple writers' records into one
-  fsync ("group commit") — is a well-scoped future improvement, not
-  implemented here.
 
 ## License
 
