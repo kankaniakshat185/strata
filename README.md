@@ -1,7 +1,4 @@
-# Strata
-
-[![CI](https://github.com/kankaniakshat185/strata/actions/workflows/ci.yml/badge.svg)](https://github.com/kankaniakshat185/strata/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+<h1 align="center">Strata</h1>
 
 Built as a collaborative 2-member team by [Akshat Kankani](https://github.com/kankaniakshat185) and [Vaishnavi Rai](https://github.com/VaishnaviRai287).  
 
@@ -47,7 +44,7 @@ raw points land fast and unprocessed, and the real statistical work
 rather than bolting compression, compaction, and indexing on as three
 disconnected pieces.
 
-## Architecture
+## System Architecture
 
 ```mermaid
 flowchart LR
@@ -121,7 +118,7 @@ make test                                  # build everything, run all unit test
 No external dependencies — builds with `clang++ -std=c++20` via a plain
 Makefile.
 
-## Results
+## Benchmarking
 
 *Measured on the dev machine; the shapes of these results (compression
 ratio, flat query latency, throughput plateau) are the real findings —
@@ -189,7 +186,7 @@ design, not a bottleneck that was missed.
 
 <img src="docs/images/throughput_concurrency.svg" width="560" alt="Line chart showing write throughput staying flat around 46,500 to 48,920 points per second regardless of concurrent writer thread count from 1 to 32">
 
-## Engineering tradeoffs
+## Engineering Decisions
 
 Built to be defensible, not to look feature-complete. What's explicitly
 out of scope, and why:
@@ -222,4 +219,4 @@ out of scope, and why:
 
 ## License
 
-MIT — see [LICENSE](LICENSE) for details.
+MIT License. See `LICENSE` for more information.
