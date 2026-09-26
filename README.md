@@ -64,6 +64,18 @@ flowchart LR
     L3 -.spanning → stitched.-> Q
 ```
 
+## Tech Stack
+
+| Layer | Choice |
+|---|---|
+| Language | C++20 |
+| Build System | Plain `Makefile` — no CMake, no external build dependencies |
+| Testing | Raw `<cassert>` — no framework; 10 test binaries across `tests/*.cpp` |
+| OS Interface | POSIX APIs only — `open`/`pread`/`write`/`fsync`/`rename`/signals, no abstraction layer over the OS |
+| Concurrency | `std::mutex` + `std::thread`, exercised directly by the load-test tool |
+| Crash Safety | Self-inflicted `SIGKILL` via `STRATA_CRASH_AT`, driven by two independent shell harnesses |
+| CI | GitHub Actions — full test suite plus both crash-recovery harnesses, on every push, on Ubuntu and macOS |
+
 ## Engineering Decisions
 
 Built to be defensible, not to look feature-complete. What's explicitly
@@ -94,19 +106,7 @@ out of scope, and why:
   for higher throughput — batching multiple writers' records into one
   fsync ("group commit") — is a well-scoped future improvement, not
   implemented here.
-
-## Tech Stack
-
-| Layer | Choice |
-|---|---|
-| Language | C++20 |
-| Build System | Plain `Makefile` — no CMake, no external build dependencies |
-| Testing | Raw `<cassert>` — no framework; 10 test binaries across `tests/*.cpp` |
-| OS Interface | POSIX APIs only — `open`/`pread`/`write`/`fsync`/`rename`/signals, no abstraction layer over the OS |
-| Concurrency | `std::mutex` + `std::thread`, exercised directly by the load-test tool |
-| Crash Safety | Self-inflicted `SIGKILL` via `STRATA_CRASH_AT`, driven by two independent shell harnesses |
-| CI | GitHub Actions — full test suite plus both crash-recovery harnesses, on every push, on Ubuntu and macOS |
-
+  
 ## Highlights
 
 - **4.3x smaller than naive storage** — a hand-implemented version of
