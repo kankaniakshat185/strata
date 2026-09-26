@@ -64,6 +64,18 @@ flowchart LR
     L3 -.spanning → stitched.-> Q
 ```
 
+## Tech Stack
+
+| Layer | Choice |
+|---|---|
+| Language | C++20 |
+| Build System | Plain `Makefile` — no CMake, no external build dependencies |
+| Testing | Raw `<cassert>` — no framework; 10 test binaries across `tests/*.cpp` |
+| OS Interface | POSIX APIs only — `open`/`pread`/`write`/`fsync`/`rename`/signals, no abstraction layer over the OS |
+| Concurrency | `std::mutex` + `std::thread`, exercised directly by the load-test tool |
+| Crash Safety | Self-inflicted `SIGKILL` via `STRATA_CRASH_AT`, driven by two independent shell harnesses |
+| CI | GitHub Actions — full test suite plus both crash-recovery harnesses, on every push, on Ubuntu and macOS |
+
 ## Highlights
 
 - **4.3x smaller than naive storage** — a hand-implemented version of
@@ -185,6 +197,74 @@ disk before it's acknowledged — the honest ceiling of a durability-first
 design, not a bottleneck that was missed.
 
 <img src="docs/images/throughput_concurrency.svg" width="560" alt="Line chart showing write throughput staying flat around 46,500 to 48,920 points per second regardless of concurrent writer thread count from 1 to 32">
+
+## Testing
+
+10 test binaries across `tests/*.cpp`, run on every push via GitHub Actions (`make test`), plus two independent crash-recovery harnesses:
+
+- **Bit-exact codec verification** — every Gorilla-encoded value round-trips checked against its raw IEEE-754 bit pattern (`BitExactEqual`), not `==`, so a silently-normalized `-0.0` or a flushed subnormal can't pass as correct.
+- **Hand-verified rollup math** — compaction and rollup-merge output checked against numbers computed by hand, including a test built specifically to measure (not just assert) how far a merged p99 estimate can drift from the truth: 89.1% divergence on data built to expose the worst case.
+- **Deterministic crash-safety** — `phase6_crash_recovery.sh` drives 7 self-inflicted `SIGKILL` points via `STRATA_CRASH_AT`, each checked against an *exact* expected recovery outcome, not just "didn't crash."
+- **Realistic crash-safety** — `phase1_crash_recovery.sh` sends a real external `SIGKILL` mid-write at an unpredictable moment and confirms recovery.
+- **Cross-structure validation** — the B+ tree's `PrefixQuery` is checked directly against the inverted index's brute-force equivalent on identical data, so both structures are proven to agree, not just individually assumed correct.
+
+## Local Development Initialization
+
+No package manager, no fetched dependencies — the whole toolchain is `clang++`, `make`, and POSIX.
+
+```bash
+git clone https://github.com/kankaniakshat185/strata.git
+cd strata
+
+make test                              # builds everything, runs all 10 test binaries
+
+# crash-recovery harnesses (strata_tool is built as part of `make test`/`make all`)
+./tests/phase1_crash_recovery.sh       # external timed SIGKILL
+./tests/phase6_crash_recovery.sh       # 7 deterministic fault-injection points
+
+# benchmarks -- each is its own strata_tool subcommand, see Benchmarking above
+./build/strata_tool bench ./data
+./build/strata_tool cardbench
+./build/strata_tool indexbench
+./build/strata_tool query-bench ./data
+./build/strata_tool loadtest ./data
+```
+
+## Project Structure
+
+```
+src/strata/
+├── wal.cpp / wal.hpp              # write-ahead log
+├── memtable.hpp                   # in-memory sorted write buffer
+├── block_format.cpp / .hpp        # shared on-disk layout for every block level
+├── l0_writer.cpp / .hpp           # raw (L0) block read/write
+├── l1_writer.cpp / .hpp           # rollup block read/write, all levels (L1-L3)
+├── gorilla.cpp / .hpp             # bit-level Gorilla compression codec
+├── bitio.hpp                      # BitWriter / BitReader primitives
+├── compactor.cpp / .hpp           # L0->L1 compaction and the L1->L2->L3 cascade
+├── manifest.cpp / .hpp            # atomic block-liveness tracking, crash-safe swaps
+├── series_catalog.cpp / .hpp      # canonical label string <-> series_id
+├── inverted_index.cpp / .hpp      # hash-map label index
+├── bplus_tree.cpp / .hpp          # B+ tree index, benchmarked against the hash map
+├── query_router.cpp / .hpp        # range- and level-aware query routing
+├── fault_injection.cpp / .hpp     # self-inflicted SIGKILL crash points
+├── engine.cpp / .hpp              # ties the write/read path together
+└── fsutil.cpp / .hpp, crc32.cpp / .hpp, byteio.hpp, version.hpp
+
+tests/                  # 10 test binaries, plus phase1/phase6 crash-recovery harnesses
+tools/strata_tool.cpp   # CLI: write / recover / compact / bench / cardbench / indexbench / query-bench / loadtest / crashtest
+docs/HOW_IT_WORKS.md    # full pipeline, codec math, and crash-safety writeup
+docs/images/            # benchmark chart SVGs
+.github/workflows/      # ci.yml, release.yml
+blog.md                 # long-form engineering writeup
+```
+
+## Documentation
+
+The deeper writeups live in two places:
+
+- **[docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md)** — the technical reference: the pipeline stage by stage, the compression codec's math with worked bit-level examples, the crash-safety design, and the B+ tree comparison in full.
+- **[blog.md](blog.md)** — a long-form narrative writeup: the actual build order, numbers self-measured rather than assumed, and an honest accounting of what's good, bad, and still unresolved.
 
 ## Engineering Decisions
 
